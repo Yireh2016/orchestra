@@ -41,3 +41,4 @@ redisdata/
 *.log
 npm-debug.log*
 pnpm-debug.log*
+apps/core/tsconfig.tsbuildinfo

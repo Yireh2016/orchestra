@@ -24,6 +24,8 @@
     "@orchestra/shared": "workspace:*",
     "@prisma/client": "^6.0.0",
     "bullmq": "^5.0.0",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.15.1",
     "express": "^5.2.1",
     "ioredis": "^5.0.0",
     "jsonwebtoken": "^9.0.3",
