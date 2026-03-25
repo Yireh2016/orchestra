@@ -9,9 +9,10 @@ import { GateRunnerService } from './execution/gate-runner.service';
 import { ReviewHandler } from './review/review.handler';
 import { AdaptersModule } from '../adapters/adapters.module';
 import { WorkflowModule } from '../workflow/workflow.module';
+import { AgentRuntimeModule } from '../agent-runtime/agent-runtime.module';
 
 @Module({
-  imports: [AdaptersModule, forwardRef(() => WorkflowModule)],
+  imports: [AdaptersModule, forwardRef(() => WorkflowModule), AgentRuntimeModule],
   providers: [
     InterviewHandler,
     ConflictDetectorService,

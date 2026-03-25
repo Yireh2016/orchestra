@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { Queue, Worker, Job } from 'bullmq';
 import { PrismaService } from '../common/database/prisma.service';
 import { AgentPoolService } from './agent-pool.service';
+import { ContainerService, type RunTaskParams } from './container.service';
 
 export const TASK_QUEUE_NAME = 'orchestra-task-execution';
 
@@ -11,6 +12,16 @@ export interface TaskJobData {
   workflowRunId: string;
   prompt: string;
   workingDirectory: string;
+  repoUrl?: string;
+  branch?: string;
+  baseBranch?: string;
+  taskDefinition?: {
+    title: string;
+    description: string;
+    acceptanceCriteria?: string[];
+    gates?: { name: string; command: string }[];
+  };
+  timeout?: number;
 }
 
 export type TaskCompletedCallback = (data: {
@@ -30,6 +41,7 @@ export class TaskQueueService implements OnModuleInit {
     private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
     private readonly agentPool: AgentPoolService,
+    private readonly containerService: ContainerService,
   ) {}
 
   /**
@@ -68,28 +80,13 @@ export class TaskQueueService implements OnModuleInit {
       },
     );
 
-    this.worker.on('completed', async (job: Job<TaskJobData>) => {
-      this.logger.log(`Task ${job.data.taskId} completed`);
-      await this.evaluateDownstream(job.data);
-      if (this.onTaskCompletedCallback) {
-        await this.onTaskCompletedCallback({
-          taskId: job.data.taskId,
-          workflowRunId: job.data.workflowRunId,
-          status: 'PASSED',
-        });
-      }
-    });
-
     this.worker.on('failed', async (job: Job<TaskJobData> | undefined, error: Error) => {
       this.logger.error(
-        `Task ${job?.data.taskId} failed: ${error.message}`,
+        `Task ${job?.data.taskId} worker error: ${error.message}`,
       );
-      if (job && this.onTaskCompletedCallback) {
-        await this.onTaskCompletedCallback({
-          taskId: job.data.taskId,
-          workflowRunId: job.data.workflowRunId,
-          status: 'FAILED',
-        });
+      if (job) {
+        await this.markTaskStatus(job.data.taskId, 'FAILED');
+        await this.notifyCompletion(job.data, 'FAILED');
       }
     });
   }
@@ -108,26 +105,188 @@ export class TaskQueueService implements OnModuleInit {
     this.logger.log(`Enqueued task ${data.taskId}`);
   }
 
+  /**
+   * Called by AgentCallbackController when a Docker/K8s container reports back.
+   */
+  async handleAgentCallback(data: {
+    taskId: string;
+    workflowRunId: string;
+    status: 'PASSED' | 'FAILED';
+    output?: string;
+  }): Promise<void> {
+    this.logger.log(
+      `Agent callback received for task ${data.taskId}: ${data.status}`,
+    );
+
+    if (data.output) {
+      this.agentPool.appendLogs(data.taskId, data.output);
+    }
+
+    await this.evaluateDownstream({
+      taskId: data.taskId,
+      workflowRunId: data.workflowRunId,
+      prompt: '',
+      workingDirectory: '',
+    });
+
+    await this.notifyCompletion(
+      { taskId: data.taskId, workflowRunId: data.workflowRunId, prompt: '', workingDirectory: '' },
+      data.status,
+    );
+  }
+
+  // ── Internal processing ─────────────────────────────────────────────────
+
   private async processTask(job: Job<TaskJobData>): Promise<void> {
     const { taskId, workflowRunId, prompt, workingDirectory } = job.data;
 
     this.logger.log(`Processing task ${taskId}`);
 
-    await this.prisma.task.update({
-      where: { id: taskId },
-      data: { status: 'RUNNING' },
-    });
+    await this.markTaskStatus(taskId, 'RUNNING');
 
-    const instance = await this.agentPool.acquire(workflowRunId, taskId, {
-      prompt,
-      workingDirectory,
-      timeout: 600000,
-    });
+    // Build RunTaskParams for the container service
+    const callbackBaseUrl = this.configService.get<string>(
+      'CALLBACK_BASE_URL',
+      'http://localhost:3000',
+    );
 
-    await this.prisma.task.update({
-      where: { id: taskId },
-      data: { agentInstanceId: instance.id },
-    });
+    const runParams: RunTaskParams = {
+      taskId,
+      workflowRunId,
+      repoUrl: job.data.repoUrl || '',
+      branch: job.data.branch || 'main',
+      baseBranch: job.data.baseBranch || 'main',
+      workingDirectory: workingDirectory || process.cwd(),
+      taskDefinition: job.data.taskDefinition || {
+        title: `Task ${taskId}`,
+        description: prompt,
+      },
+      callbackUrl: `${callbackBaseUrl}/agent-callback`,
+      timeout: job.data.timeout || 600_000,
+    };
+
+    let result;
+    try {
+      result = await this.containerService.runTask(runParams);
+    } catch (error: any) {
+      this.logger.error(
+        `Task ${taskId} execution error: ${error.message}`,
+      );
+      await this.markTaskStatus(taskId, 'FAILED');
+      await this.notifyCompletion(job.data, 'FAILED');
+      throw error; // Let BullMQ mark the job as failed
+    }
+
+    // Store the output in the agent pool logs
+    if (result.output) {
+      this.agentPool.appendLogs(taskId, result.output);
+    }
+
+    if (!result.success) {
+      this.logger.warn(
+        `Task ${taskId} failed (exit code ${result.exitCode})`,
+      );
+      await this.markTaskStatus(taskId, 'FAILED');
+      await this.notifyCompletion(job.data, 'FAILED');
+      return;
+    }
+
+    // Run gate commands if defined
+    const gates = job.data.taskDefinition?.gates;
+    if (gates && gates.length > 0) {
+      const gatesPassed = await this.runGates(taskId, gates, workingDirectory);
+      if (!gatesPassed) {
+        this.logger.warn(`Task ${taskId} failed gate validation`);
+        await this.markTaskStatus(taskId, 'FAILED');
+        await this.notifyCompletion(job.data, 'FAILED');
+        return;
+      }
+    }
+
+    // Task succeeded
+    this.logger.log(`Task ${taskId} completed successfully`);
+    await this.markTaskStatus(taskId, 'PASSED');
+    await this.evaluateDownstream(job.data);
+    await this.notifyCompletion(job.data, 'PASSED');
+  }
+
+  /**
+   * Run gate commands sequentially; return true if all pass.
+   */
+  private async runGates(
+    taskId: string,
+    gates: { name: string; command: string }[],
+    workingDirectory: string,
+  ): Promise<boolean> {
+    const { execFile } = require('child_process');
+
+    for (const gate of gates) {
+      this.logger.log(
+        `Running gate "${gate.name}" for task ${taskId}: ${gate.command}`,
+      );
+
+      const passed = await new Promise<boolean>((resolve) => {
+        execFile(
+          '/bin/bash',
+          ['-c', gate.command],
+          {
+            cwd: workingDirectory || process.cwd(),
+            timeout: 120_000,
+            maxBuffer: 5 * 1024 * 1024,
+          },
+          (error: any) => {
+            if (error) {
+              this.logger.warn(
+                `Gate "${gate.name}" failed for task ${taskId}: ${error.message}`,
+              );
+              resolve(false);
+            } else {
+              this.logger.log(`Gate "${gate.name}" passed for task ${taskId}`);
+              resolve(true);
+            }
+          },
+        );
+      });
+
+      if (!passed) return false;
+    }
+
+    return true;
+  }
+
+  private async markTaskStatus(
+    taskId: string,
+    status: 'PENDING' | 'QUEUED' | 'RUNNING' | 'PASSED' | 'FAILED',
+  ): Promise<void> {
+    try {
+      await this.prisma.task.update({
+        where: { id: taskId },
+        data: { status },
+      });
+    } catch (error: any) {
+      this.logger.error(
+        `Failed to update task ${taskId} status to ${status}: ${error.message}`,
+      );
+    }
+  }
+
+  private async notifyCompletion(
+    data: TaskJobData,
+    status: 'PASSED' | 'FAILED',
+  ): Promise<void> {
+    if (this.onTaskCompletedCallback) {
+      try {
+        await this.onTaskCompletedCallback({
+          taskId: data.taskId,
+          workflowRunId: data.workflowRunId,
+          status,
+        });
+      } catch (error: any) {
+        this.logger.error(
+          `Task completion callback error for ${data.taskId}: ${error.message}`,
+        );
+      }
+    }
   }
 
   private async evaluateDownstream(data: TaskJobData): Promise<void> {

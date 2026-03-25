@@ -12,6 +12,8 @@ import { ResearchHandler } from '../phases/research/research.handler';
 import { PlanningHandler } from '../phases/planning/planning.handler';
 import { ExecutionHandler } from '../phases/execution/execution.handler';
 import { ReviewHandler } from '../phases/review/review.handler';
+import { TaskQueueService } from '../agent-runtime/task-queue.service';
+import { ContainerService } from '../agent-runtime/container.service';
 
 /**
  * Shape of a phase definition as stored in the template's `phases` JSON column.
@@ -52,6 +54,8 @@ export class WorkflowOrchestratorService implements OnModuleInit {
     private readonly planningHandler: PlanningHandler,
     private readonly executionHandler: ExecutionHandler,
     private readonly reviewHandler: ReviewHandler,
+    private readonly taskQueue: TaskQueueService,
+    private readonly containerService: ContainerService,
   ) {}
 
   onModuleInit() {
@@ -65,6 +69,13 @@ export class WorkflowOrchestratorService implements OnModuleInit {
     this.logger.log(
       `Registered ${this.phaseHandlers.size} phase handlers: ${[...this.phaseHandlers.keys()].join(', ')}`,
     );
+
+    // Wire up the task completion callback so agent-runtime results flow back
+    // into the orchestrator's phase logic.
+    this.taskQueue.setOnTaskCompleted(async (data) => {
+      await this.handleTaskCompleted(data.workflowRunId, data.taskId);
+    });
+    this.logger.log('Task completion callback registered with TaskQueueService');
   }
 
   // ---------------------------------------------------------------------------

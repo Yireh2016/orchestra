@@ -2,7 +2,7 @@
 
 import { Header } from "@/components/layout/header";
 import { useEffect, useState } from "react";
-import { getWorkflows, getTemplates, Workflow, WorkflowTemplate } from "@/lib/api-client";
+import { getWorkflows, getTemplates, getAgents, Workflow, WorkflowTemplate, Agent } from "@/lib/api-client";
 
 function stateColor(state: string) {
   switch (state) {
@@ -30,15 +30,17 @@ function timeAgo(dateStr: string) {
 export default function DashboardPage() {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [templates, setTemplates] = useState<WorkflowTemplate[]>([]);
+  const [agentsList, setAgentsList] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     async function load() {
       try {
-        const [wfs, tpls] = await Promise.all([getWorkflows(), getTemplates()]);
+        const [wfs, tpls, ags] = await Promise.all([getWorkflows(), getTemplates(), getAgents()]);
         setWorkflows(wfs);
         setTemplates(tpls);
+        setAgentsList(ags);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Failed to load data");
       } finally {
@@ -59,7 +61,7 @@ export default function DashboardPage() {
 
   const stats = [
     { label: "Active Workflows", value: loading ? "..." : String(activeWorkflows.length), change: loading ? "" : `${workflows.length} total`, color: "text-[var(--primary)]" },
-    { label: "Tasks Running", value: loading ? "..." : String(runningTasks), change: "", color: "text-emerald-400" },
+    { label: "Agents Online", value: loading ? "..." : String(agentsList.filter((a) => a.status === "running").length), change: loading ? "" : `${agentsList.length} total`, color: "text-emerald-400" },
     { label: "Templates", value: loading ? "..." : String(templates.length), change: "", color: "text-sky-400" },
     { label: "Success Rate", value: loading ? "..." : total > 0 ? `${successRate}%` : "N/A", change: loading ? "" : `${total} finished`, color: "text-amber-400" },
   ];

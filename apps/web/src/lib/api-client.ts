@@ -53,11 +53,19 @@ export interface Task {
 
 export interface Agent {
   id: string;
-  name: string;
-  type: string;
-  status: "online" | "offline" | "idle";
-  activeTasks: number;
-  maxConcurrent: number;
+  name?: string;
+  type?: string;
+  status: "running" | "idle" | "failed" | "online" | "offline";
+  workflowRunId?: string | null;
+  taskId?: string | null;
+  startedAt?: string | null;
+  activeTasks?: number;
+  maxConcurrent?: number;
+}
+
+export interface AgentLogs {
+  agentId: string;
+  logs: string[];
 }
 
 export interface AuditEntry {
@@ -210,6 +218,18 @@ export async function publishTemplate(id: string): Promise<WorkflowTemplate> {
 
 export async function getAgents(): Promise<Agent[]> {
   return request<Agent[]>("/agents");
+}
+
+export async function getAgent(id: string): Promise<Agent> {
+  return request<Agent>(`/agents/${id}`);
+}
+
+export async function getAgentLogs(id: string): Promise<AgentLogs> {
+  return request<AgentLogs>(`/agents/${id}/logs`);
+}
+
+export async function stopAgent(id: string): Promise<void> {
+  return request<void>(`/agents/${id}/stop`, { method: "POST" });
 }
 
 // --- Integrations ---

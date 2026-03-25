@@ -67,6 +67,14 @@ export class ExecutionHandler implements PhaseHandler {
           workflowRunId: workflowRun.id,
           prompt: `Implement the following task on branch ${task.branch}:\n\nTicket: ${task.ticketId}\n\nFollow existing code patterns and conventions.`,
           workingDirectory: '.',
+          repoUrl: repo,
+          branch: task.branch,
+          baseBranch,
+          taskDefinition: {
+            title: task.ticketId,
+            description: `Implement task ${task.ticketId} on branch ${task.branch}`,
+            acceptanceCriteria: [],
+          },
         });
       } catch (err) {
         this.logger.warn(
@@ -217,6 +225,14 @@ export class ExecutionHandler implements PhaseHandler {
             workflowRunId: workflowRun.id,
             prompt: healPrompt,
             workingDirectory: '.',
+            repoUrl: repo,
+            branch: task.branch,
+            baseBranch,
+            taskDefinition: {
+              title: task.ticketId,
+              description: healPrompt,
+              acceptanceCriteria: [],
+            },
           });
         } catch (err) {
           this.logger.warn(
@@ -288,6 +304,14 @@ export class ExecutionHandler implements PhaseHandler {
             workflowRunId: workflowRun.id,
             prompt: `Implement the following task on branch ${task.branch}:\n\nTicket: ${task.ticketId}\n\nFollow existing code patterns and conventions.`,
             workingDirectory: '.',
+            repoUrl: repo,
+            branch: task.branch,
+            baseBranch,
+            taskDefinition: {
+              title: task.ticketId,
+              description: `Implement task ${task.ticketId} on branch ${task.branch}`,
+              acceptanceCriteria: [],
+            },
           });
         } catch (err) {
           this.logger.warn(

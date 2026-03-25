@@ -1,26 +1,46 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { randomUUID } from 'crypto';
+import { execFile } from 'child_process';
+import { AdapterConfigService } from '../adapters/adapter-config.service';
 
-export interface ContainerJob {
-  id: string;
-  name: string;
-  namespace: string;
-  image: string;
-  status: 'pending' | 'running' | 'succeeded' | 'failed';
-  result?: string;
-  createdAt: Date;
-  completedAt?: Date;
+export interface RunTaskParams {
+  taskId: string;
+  workflowRunId: string;
+  repoUrl: string;
+  branch: string;
+  baseBranch?: string;
+  workingDirectory?: string;
+  taskDefinition: {
+    title: string;
+    description: string;
+    acceptanceCriteria?: string[];
+    gates?: { name: string; command: string }[];
+  };
+  callbackUrl: string;
+  timeout?: number;
+}
+
+export interface TaskRunResult {
+  success: boolean;
+  output: string;
+  exitCode: number;
 }
 
 @Injectable()
 export class ContainerService {
   private readonly logger = new Logger(ContainerService.name);
-  private readonly jobs = new Map<string, ContainerJob>();
+  private readonly mode: 'process' | 'docker' | 'k8s';
   private readonly namespace: string;
   private readonly image: string;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly adapterConfig: AdapterConfigService,
+  ) {
+    this.mode = this.configService.get<string>(
+      'AGENT_RUNTIME_MODE',
+      'process',
+    ) as 'process' | 'docker' | 'k8s';
     this.namespace = this.configService.get<string>(
       'K8S_NAMESPACE',
       'orchestra',
@@ -29,25 +49,137 @@ export class ContainerService {
       'AGENT_CONTAINER_IMAGE',
       'orchestra/coding-agent:latest',
     );
+    this.logger.log(`Agent runtime mode: ${this.mode}`);
   }
 
-  async createJob(params: {
-    name: string;
-    command: string[];
-    env: Record<string, string>;
-    timeout?: number;
-  }): Promise<ContainerJob> {
-    const id = randomUUID();
-    const jobName = `${params.name}-${id.slice(0, 8)}`;
+  async runTask(params: RunTaskParams): Promise<TaskRunResult> {
+    this.logger.log(
+      `Running task ${params.taskId} in ${this.mode} mode`,
+    );
+
+    switch (this.mode) {
+      case 'process':
+        return this.runAsProcess(params);
+      case 'docker':
+        return this.runAsDocker(params);
+      case 'k8s':
+        return this.runAsK8sJob(params);
+      default:
+        throw new Error(`Unknown runtime mode: ${this.mode}`);
+    }
+  }
+
+  /**
+   * Process mode: Run Claude Code CLI directly as a child process.
+   * Fastest for local development -- no container overhead.
+   */
+  private async runAsProcess(params: RunTaskParams): Promise<TaskRunResult> {
+    const apiKey = await this.resolveApiKey();
+    const prompt = this.buildPrompt(params);
+    const timeout = params.timeout || 600_000;
 
     this.logger.log(
-      `Creating K8s Job ${jobName} in namespace ${this.namespace}`,
+      `[process] Spawning claude CLI for task ${params.taskId}`,
     );
+
+    return new Promise<TaskRunResult>((resolve) => {
+      execFile(
+        'claude',
+        ['-p', prompt, '--output-format', 'json'],
+        {
+          cwd: params.workingDirectory || process.cwd(),
+          env: { ...process.env, ANTHROPIC_API_KEY: apiKey },
+          maxBuffer: 10 * 1024 * 1024, // 10 MB
+          timeout,
+        },
+        (error, stdout, stderr) => {
+          if (error) {
+            this.logger.warn(
+              `[process] Task ${params.taskId} failed: ${error.message}`,
+            );
+            resolve({
+              success: false,
+              output: stderr || error.message,
+              exitCode:
+                typeof (error as any).code === 'number'
+                  ? (error as any).code
+                  : 1,
+            });
+          } else {
+            this.logger.log(
+              `[process] Task ${params.taskId} completed successfully`,
+            );
+            resolve({ success: true, output: stdout, exitCode: 0 });
+          }
+        },
+      );
+    });
+  }
+
+  /**
+   * Docker mode: Spin up an agent container locally.
+   * Uses the same container image as production K8s jobs.
+   */
+  private async runAsDocker(params: RunTaskParams): Promise<TaskRunResult> {
+    const apiKey = await this.resolveApiKey();
+    const containerName = `orchestra-agent-${params.taskId.slice(0, 8)}`;
+    const timeout = params.timeout || 600_000;
+
+    const envArgs = [
+      '-e', `REPO_URL=${params.repoUrl}`,
+      '-e', `BRANCH=${params.branch}`,
+      '-e', `TASK_DEFINITION=${JSON.stringify(params.taskDefinition)}`,
+      '-e', `CALLBACK_URL=${params.callbackUrl}`,
+      '-e', `API_KEY=${apiKey}`,
+      '-e', `BASE_BRANCH=${params.baseBranch || 'main'}`,
+    ];
+
+    this.logger.log(
+      `[docker] Starting container ${containerName} (image: ${this.image})`,
+    );
+
+    return new Promise<TaskRunResult>((resolve) => {
+      execFile(
+        'docker',
+        ['run', '--rm', '--name', containerName, ...envArgs, this.image],
+        { timeout, maxBuffer: 10 * 1024 * 1024 },
+        (error, stdout, stderr) => {
+          if (error) {
+            this.logger.warn(
+              `[docker] Container ${containerName} failed: ${error.message}`,
+            );
+            resolve({
+              success: false,
+              output: stderr || error.message,
+              exitCode: 1,
+            });
+          } else {
+            this.logger.log(
+              `[docker] Container ${containerName} completed successfully`,
+            );
+            resolve({ success: true, output: stdout, exitCode: 0 });
+          }
+        },
+      );
+    });
+  }
+
+  /**
+   * K8s mode: Create a Kubernetes Job for production execution.
+   * The actual result comes back asynchronously via the callback URL.
+   */
+  private async runAsK8sJob(params: RunTaskParams): Promise<TaskRunResult> {
+    const apiKey = await this.resolveApiKey();
+    const jobName = `orchestra-agent-${params.taskId.slice(0, 8)}`;
+    const activeDeadlineSeconds = params.timeout
+      ? Math.floor(params.timeout / 1000)
+      : 3600;
 
     const k8sApiUrl = this.configService.get<string>(
       'K8S_API_URL',
       'https://kubernetes.default.svc',
     );
+    const k8sToken = this.configService.get<string>('K8S_TOKEN', '');
 
     const jobManifest = {
       apiVersion: 'batch/v1',
@@ -58,14 +190,13 @@ export class ContainerService {
         labels: {
           app: 'orchestra',
           component: 'coding-agent',
-          jobId: id,
+          taskId: params.taskId,
+          workflowRunId: params.workflowRunId,
         },
       },
       spec: {
         backoffLimit: 0,
-        activeDeadlineSeconds: params.timeout
-          ? Math.floor(params.timeout / 1000)
-          : 3600,
+        activeDeadlineSeconds,
         template: {
           spec: {
             restartPolicy: 'Never',
@@ -73,11 +204,20 @@ export class ContainerService {
               {
                 name: 'agent',
                 image: this.image,
-                command: params.command,
-                env: Object.entries(params.env).map(([name, value]) => ({
-                  name,
-                  value,
-                })),
+                env: [
+                  { name: 'REPO_URL', value: params.repoUrl },
+                  { name: 'BRANCH', value: params.branch },
+                  {
+                    name: 'TASK_DEFINITION',
+                    value: JSON.stringify(params.taskDefinition),
+                  },
+                  { name: 'CALLBACK_URL', value: params.callbackUrl },
+                  { name: 'API_KEY', value: apiKey },
+                  {
+                    name: 'BASE_BRANCH',
+                    value: params.baseBranch || 'main',
+                  },
+                ],
                 resources: {
                   requests: { cpu: '500m', memory: '1Gi' },
                   limits: { cpu: '2', memory: '4Gi' },
@@ -89,6 +229,10 @@ export class ContainerService {
       },
     };
 
+    this.logger.log(
+      `[k8s] Creating Job ${jobName} in namespace ${this.namespace}`,
+    );
+
     try {
       const response = await fetch(
         `${k8sApiUrl}/apis/batch/v1/namespaces/${this.namespace}/jobs`,
@@ -96,146 +240,70 @@ export class ContainerService {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            Authorization: `Bearer ${this.configService.get<string>('K8S_TOKEN', '')}`,
+            Authorization: `Bearer ${k8sToken}`,
           },
           body: JSON.stringify(jobManifest),
         },
       );
 
       if (!response.ok) {
-        throw new Error(`K8s API error: ${response.statusText}`);
+        const body = await response.text();
+        throw new Error(`K8s API ${response.status}: ${body}`);
       }
+
+      this.logger.log(`[k8s] Job ${jobName} created successfully`);
+
+      // K8s jobs report back via callback -- return a pending result
+      return {
+        success: true,
+        output: `K8s Job ${jobName} created. Result will arrive via callback.`,
+        exitCode: 0,
+      };
     } catch (error: any) {
-      this.logger.warn(
-        `K8s job creation failed (may not be in cluster): ${error.message}`,
+      this.logger.error(
+        `[k8s] Failed to create Job ${jobName}: ${error.message}`,
       );
+      return {
+        success: false,
+        output: error.message,
+        exitCode: 1,
+      };
     }
-
-    const job: ContainerJob = {
-      id,
-      name: jobName,
-      namespace: this.namespace,
-      image: this.image,
-      status: 'pending',
-      createdAt: new Date(),
-    };
-
-    this.jobs.set(id, job);
-    return job;
   }
 
-  async getJobStatus(jobId: string): Promise<ContainerJob> {
-    const job = this.jobs.get(jobId);
-    if (!job) {
-      throw new Error(`Job ${jobId} not found`);
-    }
+  /**
+   * Build a prompt string from the task parameters for process mode.
+   */
+  private buildPrompt(params: RunTaskParams): string {
+    const task = params.taskDefinition;
+    return `You are executing a coding task. Here are the details:
 
-    const k8sApiUrl = this.configService.get<string>(
-      'K8S_API_URL',
-      'https://kubernetes.default.svc',
-    );
+Title: ${task.title}
+Description: ${task.description}
 
-    try {
-      const response = await fetch(
-        `${k8sApiUrl}/apis/batch/v1/namespaces/${this.namespace}/jobs/${job.name}`,
-        {
-          headers: {
-            Authorization: `Bearer ${this.configService.get<string>('K8S_TOKEN', '')}`,
-          },
-        },
-      );
+Acceptance Criteria:
+${task.acceptanceCriteria?.map((c: string) => `- ${c}`).join('\n') || 'None specified'}
 
-      if (response.ok) {
-        const data = (await response.json()) as any;
-        const conditions = data.status?.conditions ?? [];
+Instructions:
+1. Implement the changes described above
+2. Make sure all existing tests still pass
+3. Write new tests if needed
+4. Keep changes minimal and focused
 
-        if (conditions.some((c: any) => c.type === 'Complete' && c.status === 'True')) {
-          job.status = 'succeeded';
-          job.completedAt = new Date();
-        } else if (conditions.some((c: any) => c.type === 'Failed' && c.status === 'True')) {
-          job.status = 'failed';
-          job.completedAt = new Date();
-        } else if (data.status?.active > 0) {
-          job.status = 'running';
-        }
-      }
-    } catch {
-      this.logger.warn(`Could not fetch K8s job status for ${job.name}`);
-    }
-
-    return { ...job };
+Working directory: ${params.workingDirectory || '.'}
+Branch: ${params.branch}`;
   }
 
-  async collectResults(jobId: string): Promise<string> {
-    const job = this.jobs.get(jobId);
-    if (!job) {
-      throw new Error(`Job ${jobId} not found`);
-    }
-
-    const k8sApiUrl = this.configService.get<string>(
-      'K8S_API_URL',
-      'https://kubernetes.default.svc',
-    );
-
+  /**
+   * Resolve the Anthropic API key from adapter config or env.
+   */
+  private async resolveApiKey(): Promise<string> {
     try {
-      const podsResponse = await fetch(
-        `${k8sApiUrl}/api/v1/namespaces/${this.namespace}/pods?labelSelector=job-name=${job.name}`,
-        {
-          headers: {
-            Authorization: `Bearer ${this.configService.get<string>('K8S_TOKEN', '')}`,
-          },
-        },
-      );
-
-      if (podsResponse.ok) {
-        const podsData = (await podsResponse.json()) as any;
-        const podName = podsData.items?.[0]?.metadata?.name;
-
-        if (podName) {
-          const logsResponse = await fetch(
-            `${k8sApiUrl}/api/v1/namespaces/${this.namespace}/pods/${podName}/log`,
-            {
-              headers: {
-                Authorization: `Bearer ${this.configService.get<string>('K8S_TOKEN', '')}`,
-              },
-            },
-          );
-
-          if (logsResponse.ok) {
-            return await logsResponse.text();
-          }
-        }
-      }
+      const config = await this.adapterConfig.getConfig('claude-code');
+      if (config?.apiKey) return config.apiKey;
     } catch {
-      this.logger.warn(`Could not collect results for job ${job.name}`);
+      // Fall through to env
     }
-
-    return job.result ?? '';
-  }
-
-  async deleteJob(jobId: string): Promise<void> {
-    const job = this.jobs.get(jobId);
-    if (!job) return;
-
-    const k8sApiUrl = this.configService.get<string>(
-      'K8S_API_URL',
-      'https://kubernetes.default.svc',
-    );
-
-    try {
-      await fetch(
-        `${k8sApiUrl}/apis/batch/v1/namespaces/${this.namespace}/jobs/${job.name}?propagationPolicy=Background`,
-        {
-          method: 'DELETE',
-          headers: {
-            Authorization: `Bearer ${this.configService.get<string>('K8S_TOKEN', '')}`,
-          },
-        },
-      );
-    } catch {
-      this.logger.warn(`Could not delete K8s job ${job.name}`);
-    }
-
-    this.jobs.delete(jobId);
+    return process.env.ANTHROPIC_API_KEY || '';
   }
 }
