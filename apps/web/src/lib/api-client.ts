@@ -1,4 +1,4 @@
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api";
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
 // --- Type definitions (mirroring @orchestra/shared) ---
 
@@ -135,11 +135,27 @@ export async function createWorkflow(data: {
 
 export async function transitionWorkflow(
   id: string,
-  action: "pause" | "resume" | "cancel" | "retry"
+  state: string
 ): Promise<Workflow> {
   return request<Workflow>(`/workflows/${id}/transition`, {
+    method: "PATCH",
+    body: JSON.stringify({ state }),
+  });
+}
+
+export async function pauseWorkflow(
+  id: string,
+  reason?: string
+): Promise<Workflow> {
+  return request<Workflow>(`/workflows/${id}/pause`, {
     method: "POST",
-    body: JSON.stringify({ action }),
+    body: JSON.stringify({ reason: reason ?? "" }),
+  });
+}
+
+export async function resumeWorkflow(id: string): Promise<Workflow> {
+  return request<Workflow>(`/workflows/${id}/resume`, {
+    method: "POST",
   });
 }
 
@@ -186,7 +202,7 @@ export async function cloneTemplate(id: string): Promise<WorkflowTemplate> {
 
 export async function publishTemplate(id: string): Promise<WorkflowTemplate> {
   return request<WorkflowTemplate>(`/templates/${id}/publish`, {
-    method: "POST",
+    method: "PATCH",
   });
 }
 

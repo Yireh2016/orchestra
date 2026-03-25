@@ -1,32 +1,85 @@
+"use client";
+
 import { Header } from "@/components/layout/header";
-
-const stats = [
-  { label: "Active Workflows", value: "12", change: "+3 today", color: "text-[var(--primary)]" },
-  { label: "Tasks Running", value: "47", change: "8 queued", color: "text-emerald-400" },
-  { label: "Agents Online", value: "6", change: "2 idle", color: "text-sky-400" },
-  { label: "Success Rate", value: "94.2%", change: "+1.3% this week", color: "text-amber-400" },
-];
-
-const recentWorkflows = [
-  { id: "WF-1042", ticket: "PROJ-318", template: "Full CI/CD Pipeline", state: "Running", phase: "Code Review", started: "12 min ago" },
-  { id: "WF-1041", ticket: "PROJ-315", template: "Bug Fix Flow", state: "Completed", phase: "Deploy", started: "1 hr ago" },
-  { id: "WF-1040", ticket: "PROJ-312", template: "Feature Development", state: "Running", phase: "Implementation", started: "2 hrs ago" },
-  { id: "WF-1039", ticket: "PROJ-310", template: "Hotfix Pipeline", state: "Failed", phase: "Testing", started: "3 hrs ago" },
-  { id: "WF-1038", ticket: "PROJ-308", template: "Full CI/CD Pipeline", state: "Completed", phase: "Deploy", started: "5 hrs ago" },
-  { id: "WF-1037", ticket: "PROJ-305", template: "Feature Development", state: "Gated", phase: "Code Review", started: "6 hrs ago" },
-];
+import { useEffect, useState } from "react";
+import { getWorkflows, getTemplates, Workflow, WorkflowTemplate } from "@/lib/api-client";
 
 function stateColor(state: string) {
   switch (state) {
-    case "Running": return "bg-emerald-500/15 text-emerald-400";
-    case "Completed": return "bg-sky-500/15 text-sky-400";
-    case "Failed": return "bg-red-500/15 text-red-400";
-    case "Gated": return "bg-amber-500/15 text-amber-400";
+    case "running": return "bg-emerald-500/15 text-emerald-400";
+    case "completed": return "bg-sky-500/15 text-sky-400";
+    case "failed": return "bg-red-500/15 text-red-400";
+    case "gated": return "bg-amber-500/15 text-amber-400";
+    case "paused": return "bg-orange-500/15 text-orange-400";
+    case "cancelled": return "bg-zinc-500/15 text-zinc-400";
     default: return "bg-[var(--muted)] text-[var(--muted-foreground)]";
   }
 }
 
+function timeAgo(dateStr: string) {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs} hr ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
+}
+
 export default function DashboardPage() {
+  const [workflows, setWorkflows] = useState<Workflow[]>([]);
+  const [templates, setTemplates] = useState<WorkflowTemplate[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const [wfs, tpls] = await Promise.all([getWorkflows(), getTemplates()]);
+        setWorkflows(wfs);
+        setTemplates(tpls);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to load data");
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, []);
+
+  const activeWorkflows = workflows.filter(
+    (w) => w.state !== "completed" && w.state !== "failed" && w.state !== "cancelled"
+  );
+  const runningTasks = workflows.filter((w) => w.state === "running").length;
+  const completed = workflows.filter((w) => w.state === "completed").length;
+  const failed = workflows.filter((w) => w.state === "failed").length;
+  const total = completed + failed;
+  const successRate = total > 0 ? ((completed / total) * 100).toFixed(1) : "N/A";
+
+  const stats = [
+    { label: "Active Workflows", value: loading ? "..." : String(activeWorkflows.length), change: loading ? "" : `${workflows.length} total`, color: "text-[var(--primary)]" },
+    { label: "Tasks Running", value: loading ? "..." : String(runningTasks), change: "", color: "text-emerald-400" },
+    { label: "Templates", value: loading ? "..." : String(templates.length), change: "", color: "text-sky-400" },
+    { label: "Success Rate", value: loading ? "..." : total > 0 ? `${successRate}%` : "N/A", change: loading ? "" : `${total} finished`, color: "text-amber-400" },
+  ];
+
+  const recentWorkflows = [...workflows]
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    .slice(0, 8);
+
+  if (error) {
+    return (
+      <div className="p-8">
+        <Header title="Dashboard" />
+        <div className="mt-8 rounded-xl border border-red-500/30 bg-red-500/10 p-6 text-red-400">
+          <p className="font-medium">Error loading dashboard</p>
+          <p className="mt-1 text-sm">{error}</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="p-8">
       <Header title="Dashboard" />
@@ -39,43 +92,51 @@ export default function DashboardPage() {
           >
             <p className="text-sm text-[var(--muted-foreground)]">{stat.label}</p>
             <p className={`mt-2 text-3xl font-bold ${stat.color}`}>{stat.value}</p>
-            <p className="mt-1 text-xs text-[var(--muted-foreground)]">{stat.change}</p>
+            {stat.change && <p className="mt-1 text-xs text-[var(--muted-foreground)]">{stat.change}</p>}
           </div>
         ))}
       </div>
 
       <div className="mt-10">
         <h2 className="text-lg font-semibold text-[var(--foreground)]">Recent Workflows</h2>
-        <div className="mt-4 overflow-hidden rounded-xl border border-[var(--border)]">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-[var(--border)] bg-[var(--muted)]">
-                <th className="px-4 py-3 text-left font-medium text-[var(--muted-foreground)]">ID</th>
-                <th className="px-4 py-3 text-left font-medium text-[var(--muted-foreground)]">Ticket</th>
-                <th className="px-4 py-3 text-left font-medium text-[var(--muted-foreground)]">Template</th>
-                <th className="px-4 py-3 text-left font-medium text-[var(--muted-foreground)]">State</th>
-                <th className="px-4 py-3 text-left font-medium text-[var(--muted-foreground)]">Phase</th>
-                <th className="px-4 py-3 text-left font-medium text-[var(--muted-foreground)]">Started</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recentWorkflows.map((wf) => (
-                <tr key={wf.id} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--muted)]/50 transition-colors">
-                  <td className="px-4 py-3 font-mono text-[var(--primary)]">{wf.id}</td>
-                  <td className="px-4 py-3 text-[var(--foreground)]">{wf.ticket}</td>
-                  <td className="px-4 py-3 text-[var(--foreground)]">{wf.template}</td>
-                  <td className="px-4 py-3">
-                    <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${stateColor(wf.state)}`}>
-                      {wf.state}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-[var(--muted-foreground)]">{wf.phase}</td>
-                  <td className="px-4 py-3 text-[var(--muted-foreground)]">{wf.started}</td>
+        {loading ? (
+          <p className="mt-4 text-sm text-[var(--muted-foreground)]">Loading...</p>
+        ) : recentWorkflows.length === 0 ? (
+          <p className="mt-4 text-sm text-[var(--muted-foreground)]">No workflows yet. Create one from the Workflows page.</p>
+        ) : (
+          <div className="mt-4 overflow-hidden rounded-xl border border-[var(--border)]">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[var(--border)] bg-[var(--muted)]">
+                  <th className="px-4 py-3 text-left font-medium text-[var(--muted-foreground)]">ID</th>
+                  <th className="px-4 py-3 text-left font-medium text-[var(--muted-foreground)]">Ticket</th>
+                  <th className="px-4 py-3 text-left font-medium text-[var(--muted-foreground)]">Template</th>
+                  <th className="px-4 py-3 text-left font-medium text-[var(--muted-foreground)]">State</th>
+                  <th className="px-4 py-3 text-left font-medium text-[var(--muted-foreground)]">Started</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {recentWorkflows.map((wf) => (
+                  <tr key={wf.id} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--muted)]/50 transition-colors">
+                    <td className="px-4 py-3">
+                      <a href={`/workflows/${wf.id}`} className="font-mono text-[var(--primary)] hover:underline">
+                        {wf.id.slice(0, 8)}
+                      </a>
+                    </td>
+                    <td className="px-4 py-3 text-[var(--foreground)]">{wf.ticketId}</td>
+                    <td className="px-4 py-3 text-[var(--foreground)]">{wf.templateId}</td>
+                    <td className="px-4 py-3">
+                      <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${stateColor(wf.state)}`}>
+                        {wf.state}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-[var(--muted-foreground)]">{timeAgo(wf.createdAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );

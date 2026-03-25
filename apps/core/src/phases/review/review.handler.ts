@@ -47,8 +47,9 @@ export class ReviewHandler implements PhaseHandler {
           reviewStatus: 'pending',
         });
 
-        await this.codingAgent.spawn({
-          prompt: `Review the pull request at ${task.prUrl}. Check for:
+        try {
+          await this.codingAgent.spawn({
+            prompt: `Review the pull request at ${task.prUrl}. Check for:
 1. Code quality and adherence to project conventions
 2. Test coverage
 3. Security vulnerabilities
@@ -56,9 +57,12 @@ export class ReviewHandler implements PhaseHandler {
 5. Documentation completeness
 
 Provide actionable review comments.`,
-          workingDirectory: '.',
-          timeout: 300000,
-        });
+            workingDirectory: '.',
+            timeout: 300000,
+          });
+        } catch (err) {
+          this.logger.warn(`Failed to spawn review agent for PR ${task.prUrl}: ${(err as Error).message}`);
+        }
       }
     }
 
@@ -99,11 +103,15 @@ Provide actionable review comments.`,
           });
 
           if (task) {
-            await this.codingAgent.spawn({
-              prompt: `Address the following review comments on branch ${task.branch}:\n\n${JSON.stringify(event.payload.comments, null, 2)}`,
-              workingDirectory: '.',
-              timeout: 300000,
-            });
+            try {
+              await this.codingAgent.spawn({
+                prompt: `Address the following review comments on branch ${task.branch}:\n\n${JSON.stringify(event.payload.comments, null, 2)}`,
+                workingDirectory: '.',
+                timeout: 300000,
+              });
+            } catch (err) {
+              this.logger.warn(`Failed to spawn agent to address review comments for task ${taskId}: ${(err as Error).message}`);
+            }
           }
         }
       }
@@ -123,6 +131,7 @@ Provide actionable review comments.`,
       );
       if (pr) {
         pr.reviewStatus = 'merged';
+        pr.mergedAt = new Date().toISOString();
       }
 
       await this.prisma.workflowRun.update({
@@ -131,6 +140,27 @@ Provide actionable review comments.`,
           phaseData: { ...phaseData, review },
         },
       });
+
+      // Check if all PRs are merged, signaling phase completion
+      const allMerged = review.prs.every(
+        (p: { reviewStatus: string }) => p.reviewStatus === 'merged',
+      );
+
+      if (allMerged && review.prs.length > 0) {
+        review.status = 'completed';
+        review.completedAt = new Date().toISOString();
+
+        await this.prisma.workflowRun.update({
+          where: { id: workflowRun.id },
+          data: {
+            phaseData: { ...phaseData, review },
+          },
+        });
+
+        this.logger.log(
+          `All PRs merged for run ${workflowRun.id}, review phase complete`,
+        );
+      }
     }
   }
 

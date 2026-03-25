@@ -4,6 +4,8 @@ import { Queue, Worker, Job } from 'bullmq';
 import { PrismaService } from '../common/database/prisma.service';
 import { AgentPoolService } from './agent-pool.service';
 
+export const TASK_QUEUE_NAME = 'orchestra-task-execution';
+
 export interface TaskJobData {
   taskId: string;
   workflowRunId: string;
@@ -11,17 +13,32 @@ export interface TaskJobData {
   workingDirectory: string;
 }
 
+export type TaskCompletedCallback = (data: {
+  taskId: string;
+  workflowRunId: string;
+  status: 'PASSED' | 'FAILED';
+}) => Promise<void>;
+
 @Injectable()
 export class TaskQueueService implements OnModuleInit {
   private readonly logger = new Logger(TaskQueueService.name);
   private queue!: Queue<TaskJobData>;
   private worker!: Worker<TaskJobData>;
+  private onTaskCompletedCallback?: TaskCompletedCallback;
 
   constructor(
     private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
     private readonly agentPool: AgentPoolService,
   ) {}
+
+  /**
+   * Register a callback that will be invoked when a task completes or fails.
+   * The orchestrator can use this to advance phase logic.
+   */
+  setOnTaskCompleted(callback: TaskCompletedCallback): void {
+    this.onTaskCompletedCallback = callback;
+  }
 
   async onModuleInit() {
     const redisUrl = this.configService.get<string>(
@@ -35,10 +52,10 @@ export class TaskQueueService implements OnModuleInit {
       port: parseInt(url.port || '6379', 10),
     };
 
-    this.queue = new Queue<TaskJobData>('task-execution', { connection });
+    this.queue = new Queue<TaskJobData>(TASK_QUEUE_NAME, { connection });
 
     this.worker = new Worker<TaskJobData>(
-      'task-execution',
+      TASK_QUEUE_NAME,
       async (job: Job<TaskJobData>) => {
         await this.processTask(job);
       },
@@ -54,12 +71,26 @@ export class TaskQueueService implements OnModuleInit {
     this.worker.on('completed', async (job: Job<TaskJobData>) => {
       this.logger.log(`Task ${job.data.taskId} completed`);
       await this.evaluateDownstream(job.data);
+      if (this.onTaskCompletedCallback) {
+        await this.onTaskCompletedCallback({
+          taskId: job.data.taskId,
+          workflowRunId: job.data.workflowRunId,
+          status: 'PASSED',
+        });
+      }
     });
 
-    this.worker.on('failed', (job: Job<TaskJobData> | undefined, error: Error) => {
+    this.worker.on('failed', async (job: Job<TaskJobData> | undefined, error: Error) => {
       this.logger.error(
         `Task ${job?.data.taskId} failed: ${error.message}`,
       );
+      if (job && this.onTaskCompletedCallback) {
+        await this.onTaskCompletedCallback({
+          taskId: job.data.taskId,
+          workflowRunId: job.data.workflowRunId,
+          status: 'FAILED',
+        });
+      }
     });
   }
 

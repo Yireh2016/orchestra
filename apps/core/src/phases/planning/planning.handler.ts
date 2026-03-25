@@ -26,10 +26,14 @@ export class PlanningHandler implements PhaseHandler {
     const phaseData = workflowRun.phaseData as Record<string, any>;
     const researchOutput = phaseData.research?.output ?? '';
 
-    await this.channel.sendMessage({
-      threadId: workflowRun.ticketId,
-      content: `Planning phase started. Based on research, I'll generate an implementation plan.\n\nResearch summary available. Please provide any additional constraints or task breakdown preferences.`,
-    });
+    try {
+      await this.channel.sendMessage({
+        threadId: workflowRun.ticketId,
+        content: `Planning phase started. Based on research, I'll generate an implementation plan.\n\nResearch summary available. Please provide any additional constraints or task breakdown preferences.`,
+      });
+    } catch (err) {
+      this.logger.warn(`Failed to send planning start message: ${(err as Error).message}`);
+    }
 
     await this.prisma.workflowRun.update({
       where: { id: workflowRun.id },
@@ -78,10 +82,14 @@ export class PlanningHandler implements PhaseHandler {
         },
       });
 
-      await this.channel.sendMessage({
-        threadId: workflowRun.ticketId,
-        content: `Implementation plan generated with ${tasks.length} tasks in ${executionGroups.length} execution groups.\n\nGroups:\n${executionGroups.map((g: string[], i: number) => `  Group ${i + 1}: ${g.join(', ')}`).join('\n')}\n\nApprove to proceed to execution.`,
-      });
+      try {
+        await this.channel.sendMessage({
+          threadId: workflowRun.ticketId,
+          content: `Implementation plan generated with ${tasks.length} tasks in ${executionGroups.length} execution groups.\n\nGroups:\n${executionGroups.map((g: string[], i: number) => `  Group ${i + 1}: ${g.join(', ')}`).join('\n')}\n\nApprove to proceed to execution.`,
+        });
+      } catch (err) {
+        this.logger.warn(`Failed to send plan generated message: ${(err as Error).message}`);
+      }
     }
 
     if (event.type === 'plan_approved') {
@@ -95,6 +103,19 @@ export class PlanningHandler implements PhaseHandler {
           phaseData: { ...phaseData, planning },
         },
       });
+
+      this.logger.log(
+        `Plan approved for run ${workflowRun.id} by ${event.source}, ready for execution phase`,
+      );
+
+      try {
+        await this.channel.sendMessage({
+          threadId: workflowRun.ticketId,
+          content: `Plan approved by ${event.source}. Proceeding to execution phase.`,
+        });
+      } catch (err) {
+        this.logger.warn(`Failed to send plan approved message: ${(err as Error).message}`);
+      }
     }
   }
 

@@ -9,6 +9,7 @@ import { AdaptersModule } from './adapters/adapters.module';
 import { AgentRuntimeModule } from './agent-runtime/agent-runtime.module';
 import { PluginsModule } from './plugins/plugins.module';
 import { AuthModule } from './auth/auth.module';
+import { HealthController } from './common/health.controller';
 
 @Module({
   imports: [
@@ -25,5 +26,6 @@ import { AuthModule } from './auth/auth.module';
     PluginsModule,
     AuthModule,
   ],
+  controllers: [HealthController],
 })
 export class AppModule {}

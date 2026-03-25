@@ -40,11 +40,17 @@ Please explore the codebase and produce a research.md document that includes:
 
 Output the research document in markdown format.`;
 
-    const agentInstance = await this.codingAgent.spawn({
-      prompt,
-      workingDirectory: '.',
-      timeout: 300000,
-    });
+    let agentInstanceId: string | null = null;
+    try {
+      const agentInstance = await this.codingAgent.spawn({
+        prompt,
+        workingDirectory: '.',
+        timeout: 300000,
+      });
+      agentInstanceId = agentInstance.id;
+    } catch (err) {
+      this.logger.warn(`Failed to spawn coding agent for research: ${(err as Error).message}`);
+    }
 
     await this.prisma.workflowRun.update({
       where: { id: workflowRun.id },
@@ -52,8 +58,8 @@ Output the research document in markdown format.`;
         phaseData: {
           ...phaseData,
           research: {
-            agentInstanceId: agentInstance.id,
-            status: 'running',
+            agentInstanceId,
+            status: agentInstanceId ? 'running' : 'agent_unavailable',
             startedAt: new Date().toISOString(),
           },
         },
@@ -98,6 +104,26 @@ Output the research document in markdown format.`;
           phaseData: { ...phaseData, research },
         },
       });
+    }
+
+    if (event.type === 'research_complete') {
+      const phaseData = workflowRun.phaseData as Record<string, any>;
+      const research = phaseData.research ?? {};
+
+      research.status = 'completed';
+      research.output = event.payload.output as string ?? research.output;
+      research.completedAt = new Date().toISOString();
+
+      await this.prisma.workflowRun.update({
+        where: { id: workflowRun.id },
+        data: {
+          phaseData: { ...phaseData, research },
+        },
+      });
+
+      this.logger.log(
+        `Research phase completed for run ${workflowRun.id}, ready for planning`,
+      );
     }
   }
 

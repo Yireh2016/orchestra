@@ -31,10 +31,14 @@ export class InterviewHandler implements PhaseHandler {
       'What are the acceptance criteria?',
     ];
 
-    await this.channel.sendMessage({
-      threadId: workflowRun.ticketId,
-      content: `Starting requirements interview for ticket ${workflowRun.ticketId}:\n\n${initialQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n')}`,
-    });
+    try {
+      await this.channel.sendMessage({
+        threadId: workflowRun.ticketId,
+        content: `Starting requirements interview for ticket ${workflowRun.ticketId}:\n\n${initialQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n')}`,
+      });
+    } catch (err) {
+      this.logger.warn(`Failed to send interview start message: ${(err as Error).message}`);
+    }
 
     await this.prisma.workflowRun.update({
       where: { id: workflowRun.id },
@@ -59,6 +63,27 @@ export class InterviewHandler implements PhaseHandler {
     this.logger.log(
       `Interview event for run ${workflowRun.id}: ${event.type}`,
     );
+
+    if (event.type === 'approve_spec' || event.type === 'interview_complete') {
+      const phaseData = workflowRun.phaseData as Record<string, any>;
+      const interview = phaseData.interview ?? {};
+
+      interview.status = 'approved';
+      interview.approvedBy = event.source;
+      interview.approvedAt = new Date().toISOString();
+
+      await this.prisma.workflowRun.update({
+        where: { id: workflowRun.id },
+        data: {
+          phaseData: { ...phaseData, interview },
+        },
+      });
+
+      this.logger.log(
+        `Interview phase approved for run ${workflowRun.id} by ${event.source}`,
+      );
+      return;
+    }
 
     if (event.type === 'message') {
       const phaseData = workflowRun.phaseData as Record<string, any>;
@@ -91,10 +116,14 @@ export class InterviewHandler implements PhaseHandler {
       });
 
       if (conflicts.length > 0) {
-        await this.channel.sendMessage({
-          threadId: workflowRun.ticketId,
-          content: `Potential conflicts detected:\n${conflicts.map((c: { description: string }) => `- ${c.description}`).join('\n')}\n\nPlease clarify these points.`,
-        });
+        try {
+          await this.channel.sendMessage({
+            threadId: workflowRun.ticketId,
+            content: `Potential conflicts detected:\n${conflicts.map((c: { description: string }) => `- ${c.description}`).join('\n')}\n\nPlease clarify these points.`,
+          });
+        } catch (err) {
+          this.logger.warn(`Failed to send conflict notification: ${(err as Error).message}`);
+        }
       }
     }
   }

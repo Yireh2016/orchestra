@@ -108,12 +108,26 @@ export class GitHubAdapter implements CodeHostAdapter {
     }));
   }
 
+  async getLatestCommitSha(repo: string, prNumber: number): Promise<string> {
+    const response = await fetch(
+      `${this.baseUrl}/repos/${repo}/pulls/${prNumber}`,
+      { headers: this.headers },
+    );
+
+    if (!response.ok) {
+      throw new Error(`Failed to get PR #${prNumber} for commit SHA: ${response.statusText}`);
+    }
+
+    const data = (await response.json()) as any;
+    return data.head.sha as string;
+  }
+
   async addReviewComment(
     repo: string,
     prNumber: number,
     comment: { body: string; path: string; line: number },
   ): Promise<ReviewComment> {
-    const pr = await this.getPullRequest(repo, prNumber);
+    const commitSha = await this.getLatestCommitSha(repo, prNumber);
 
     const response = await fetch(
       `${this.baseUrl}/repos/${repo}/pulls/${prNumber}/comments`,
@@ -122,7 +136,7 @@ export class GitHubAdapter implements CodeHostAdapter {
         headers: this.headers,
         body: JSON.stringify({
           body: comment.body,
-          commit_id: '', // Would need the latest commit SHA
+          commit_id: commitSha,
           path: comment.path,
           line: comment.line,
           side: 'RIGHT',

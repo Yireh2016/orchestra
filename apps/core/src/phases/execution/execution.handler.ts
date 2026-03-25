@@ -30,11 +30,20 @@ export class ExecutionHandler implements PhaseHandler {
       },
     });
 
-    const readyTasks = tasks.filter(
-      (t) => !t.dependsOn.length || t.dependsOn.every((d) => false),
+    const completedTaskIds = new Set(
+      (await this.prisma.task.findMany({
+        where: { workflowRunId: workflowRun.id, status: 'PASSED' },
+        select: { id: true },
+      })).map((t) => t.id),
     );
 
-    const rootTasks = tasks.filter((task) => task.dependsOn.length === 0);
+    const readyTasks = tasks.filter(
+      (t) =>
+        t.dependsOn.length === 0 ||
+        t.dependsOn.every((depId) => completedTaskIds.has(depId)),
+    );
+
+    const rootTasks = readyTasks;
 
     for (const task of rootTasks) {
       await this.executeTask(workflowRun, task.id);
@@ -66,19 +75,27 @@ export class ExecutionHandler implements PhaseHandler {
       data: { status: 'QUEUED' },
     });
 
-    const agentInstance = await this.codingAgent.spawn({
-      prompt: `Implement the following task on branch ${task.branch}:\n\nTask: ${task.ticketId}\n\nFollow existing code patterns and conventions.`,
-      workingDirectory: '.',
-      timeout: 600000,
-    });
+    try {
+      const agentInstance = await this.codingAgent.spawn({
+        prompt: `Implement the following task on branch ${task.branch}:\n\nTask: ${task.ticketId}\n\nFollow existing code patterns and conventions.`,
+        workingDirectory: '.',
+        timeout: 600000,
+      });
 
-    await this.prisma.task.update({
-      where: { id: taskId },
-      data: {
-        status: 'RUNNING',
-        agentInstanceId: agentInstance.id,
-      },
-    });
+      await this.prisma.task.update({
+        where: { id: taskId },
+        data: {
+          status: 'RUNNING',
+          agentInstanceId: agentInstance.id,
+        },
+      });
+    } catch (err) {
+      this.logger.warn(`Failed to spawn coding agent for task ${taskId}: ${(err as Error).message}`);
+      await this.prisma.task.update({
+        where: { id: taskId },
+        data: { status: 'FAILED' },
+      });
+    }
   }
 
   async handleEvent(
@@ -110,11 +127,15 @@ export class ExecutionHandler implements PhaseHandler {
 
         const healPrompt = `The following gates failed after your changes:\n${failedGates.map((g) => `- ${g.gate}: ${g.error}`).join('\n')}\n\nPlease fix the issues and try again.`;
 
-        await this.codingAgent.spawn({
-          prompt: healPrompt,
-          workingDirectory: '.',
-          timeout: 300000,
-        });
+        try {
+          await this.codingAgent.spawn({
+            prompt: healPrompt,
+            workingDirectory: '.',
+            timeout: 300000,
+          });
+        } catch (err) {
+          this.logger.warn(`Failed to spawn self-heal agent for task ${taskId}: ${(err as Error).message}`);
+        }
         return;
       }
 

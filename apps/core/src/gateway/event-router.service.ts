@@ -10,6 +10,11 @@ export interface InboundEvent {
   prUrl?: string;
 }
 
+export interface RoutedEvent {
+  workflowRunId: string;
+  event: InboundEvent;
+}
+
 @Injectable()
 export class EventRouterService {
   private readonly logger = new Logger(EventRouterService.name);
@@ -19,7 +24,11 @@ export class EventRouterService {
     private readonly workflowService: WorkflowService,
   ) {}
 
-  async route(event: InboundEvent): Promise<void> {
+  /**
+   * Routes an event and returns the target workflow run ID and normalized event
+   * so the orchestrator can dispatch it to the appropriate phase handler.
+   */
+  async routeAndGetTarget(event: InboundEvent): Promise<RoutedEvent | null> {
     this.logger.log(
       `Routing event from ${event.provider}: ${event.eventType}`,
     );
@@ -35,7 +44,7 @@ export class EventRouterService {
           prUrl: event.prUrl,
         })}`,
       );
-      return;
+      return null;
     }
 
     await this.prisma.auditLog.create({
@@ -50,6 +59,15 @@ export class EventRouterService {
     this.logger.log(
       `Routed ${event.provider}:${event.eventType} to workflow ${workflowRun.id}`,
     );
+
+    return {
+      workflowRunId: workflowRun.id,
+      event,
+    };
+  }
+
+  async route(event: InboundEvent): Promise<void> {
+    await this.routeAndGetTarget(event);
   }
 
   private async findTargetWorkflow(event: InboundEvent) {
