@@ -9,6 +9,8 @@ import { GitHubAdapter } from './code-host/github/github.adapter';
 import { SlackAdapter } from './channel/slack/slack.adapter';
 import { JiraCommentsAdapter } from './channel/jira-comments/jira-comments.adapter';
 import { ClaudeCodeAdapter } from './coding-agent/claude-code/claude-code.adapter';
+import { AdapterConfigService } from './adapter-config.service';
+import { IntegrationsModule } from '../integrations/integrations.module';
 
 @Module({})
 export class AdaptersModule {
@@ -16,7 +18,9 @@ export class AdaptersModule {
     return {
       module: AdaptersModule,
       global: true,
+      imports: [IntegrationsModule],
       providers: [
+        AdapterConfigService,
         JiraAdapter,
         GitHubAdapter,
         SlackAdapter,
@@ -80,7 +84,13 @@ export class AdaptersModule {
           inject: [ConfigService, ClaudeCodeAdapter],
         },
       ],
-      exports: [PM_ADAPTER, CODE_HOST_ADAPTER, CHANNEL_ADAPTER, CODING_AGENT_ADAPTER],
+      exports: [
+        PM_ADAPTER,
+        CODE_HOST_ADAPTER,
+        CHANNEL_ADAPTER,
+        CODING_AGENT_ADAPTER,
+        AdapterConfigService,
+      ],
     };
   }
 }

@@ -212,6 +212,65 @@ export async function getAgents(): Promise<Agent[]> {
   return request<Agent[]>("/agents");
 }
 
+// --- Integrations ---
+
+export type IntegrationType = "PM" | "CODE_HOST" | "CHANNEL" | "CODING_AGENT";
+
+export interface Integration {
+  id: string;
+  type: IntegrationType;
+  adapterName: string;
+  config: Record<string, string>;
+  teamId: string;
+  testStatus?: "success" | "failed" | null;
+  lastTestedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function getIntegrations(): Promise<Integration[]> {
+  return request<Integration[]>("/integrations");
+}
+
+export async function getIntegration(id: string): Promise<Integration> {
+  return request<Integration>(`/integrations/${id}`);
+}
+
+export async function createIntegration(data: {
+  type: IntegrationType;
+  adapterName: string;
+  config: Record<string, string>;
+  teamId: string;
+}): Promise<Integration> {
+  return request<Integration>("/integrations", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateIntegration(
+  id: string,
+  data: { adapterName?: string; config?: Record<string, string> }
+): Promise<Integration> {
+  return request<Integration>(`/integrations/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteIntegration(id: string): Promise<void> {
+  return request<void>(`/integrations/${id}`, { method: "DELETE" });
+}
+
+export async function testIntegration(
+  id: string
+): Promise<{ success: boolean; message: string }> {
+  return request<{ success: boolean; message: string }>(
+    `/integrations/${id}/test`,
+    { method: "POST" }
+  );
+}
+
 // --- Audit ---
 
 export async function getAuditLog(params?: {

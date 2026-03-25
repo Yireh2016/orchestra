@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { AdapterConfigService } from '../../adapter-config.service';
 import type {
   ChannelAdapter,
   Message,
@@ -10,20 +11,33 @@ import type {
 export class SlackAdapter implements ChannelAdapter {
   private readonly logger = new Logger(SlackAdapter.name);
   private readonly baseUrl = 'https://slack.com/api';
-  private readonly token: string;
+  private readonly envToken: string;
 
-  constructor(private readonly configService: ConfigService) {
-    this.token = this.configService.get<string>('SLACK_BOT_TOKEN', '');
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly adapterConfig: AdapterConfigService,
+  ) {
+    this.envToken = this.configService.get<string>('SLACK_BOT_TOKEN', '');
   }
 
-  private get headers(): Record<string, string> {
+  private async getToken(): Promise<string> {
+    const dbConfig = await this.adapterConfig.getConfig('slack');
+    if (dbConfig?.botToken) {
+      return dbConfig.botToken;
+    }
+    return this.envToken;
+  }
+
+  private async getHeaders(): Promise<Record<string, string>> {
+    const token = await this.getToken();
     return {
-      Authorization: `Bearer ${this.token}`,
+      Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     };
   }
 
   async sendMessage(params: SendMessageParams): Promise<Message> {
+    const headers = await this.getHeaders();
     const body: Record<string, unknown> = {
       channel: params.threadId,
       text: params.content,
@@ -38,7 +52,7 @@ export class SlackAdapter implements ChannelAdapter {
 
     const response = await fetch(`${this.baseUrl}/chat.postMessage`, {
       method: 'POST',
-      headers: this.headers,
+      headers,
       body: JSON.stringify(body),
     });
 
@@ -58,6 +72,7 @@ export class SlackAdapter implements ChannelAdapter {
   }
 
   async getThread(threadId: string): Promise<Message[]> {
+    const headers = await this.getHeaders();
     const [channel, ts] = threadId.includes(':')
       ? threadId.split(':')
       : [threadId, undefined];
@@ -66,9 +81,7 @@ export class SlackAdapter implements ChannelAdapter {
     url.searchParams.set('channel', channel);
     if (ts) url.searchParams.set('ts', ts);
 
-    const response = await fetch(url.toString(), {
-      headers: this.headers,
-    });
+    const response = await fetch(url.toString(), { headers });
 
     const data = (await response.json()) as any;
 
@@ -86,11 +99,12 @@ export class SlackAdapter implements ChannelAdapter {
   }
 
   async updateMessage(messageId: string, content: string): Promise<Message> {
+    const headers = await this.getHeaders();
     const [channel, ts] = messageId.split(':');
 
     const response = await fetch(`${this.baseUrl}/chat.update`, {
       method: 'POST',
-      headers: this.headers,
+      headers,
       body: JSON.stringify({
         channel,
         ts,
@@ -114,11 +128,12 @@ export class SlackAdapter implements ChannelAdapter {
   }
 
   async deleteMessage(messageId: string): Promise<void> {
+    const headers = await this.getHeaders();
     const [channel, ts] = messageId.split(':');
 
     const response = await fetch(`${this.baseUrl}/chat.delete`, {
       method: 'POST',
-      headers: this.headers,
+      headers,
       body: JSON.stringify({ channel, ts }),
     });
 
@@ -130,11 +145,12 @@ export class SlackAdapter implements ChannelAdapter {
   }
 
   async addReaction(messageId: string, emoji: string): Promise<void> {
+    const headers = await this.getHeaders();
     const [channel, ts] = messageId.split(':');
 
     const response = await fetch(`${this.baseUrl}/reactions.add`, {
       method: 'POST',
-      headers: this.headers,
+      headers,
       body: JSON.stringify({
         channel,
         timestamp: ts,

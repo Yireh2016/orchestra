@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { AdapterConfigService } from '../../adapter-config.service';
 import type {
   ChannelAdapter,
   Message,
@@ -9,20 +10,50 @@ import type {
 @Injectable()
 export class JiraCommentsAdapter implements ChannelAdapter {
   private readonly logger = new Logger(JiraCommentsAdapter.name);
-  private readonly baseUrl: string;
-  private readonly email: string;
-  private readonly apiToken: string;
+  private readonly envBaseUrl: string;
+  private readonly envEmail: string;
+  private readonly envApiToken: string;
 
-  constructor(private readonly configService: ConfigService) {
-    this.baseUrl = this.configService.get<string>('JIRA_BASE_URL', '');
-    this.email = this.configService.get<string>('JIRA_EMAIL', '');
-    this.apiToken = this.configService.get<string>('JIRA_API_TOKEN', '');
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly adapterConfig: AdapterConfigService,
+  ) {
+    this.envBaseUrl = this.configService.get<string>('JIRA_BASE_URL', '');
+    this.envEmail = this.configService.get<string>('JIRA_EMAIL', '');
+    this.envApiToken = this.configService.get<string>('JIRA_API_TOKEN', '');
   }
 
-  private get headers(): Record<string, string> {
-    const auth = Buffer.from(`${this.email}:${this.apiToken}`).toString(
-      'base64',
-    );
+  private async getConnectionConfig(): Promise<{
+    baseUrl: string;
+    email: string;
+    apiToken: string;
+  }> {
+    const dbConfig = await this.adapterConfig.getConfig('jira-comments');
+    if (dbConfig?.baseUrl && dbConfig?.email && dbConfig?.apiToken) {
+      return {
+        baseUrl: dbConfig.baseUrl,
+        email: dbConfig.email,
+        apiToken: dbConfig.apiToken,
+      };
+    }
+    // Fall back to jira config if no jira-comments specific config
+    const jiraConfig = await this.adapterConfig.getConfig('jira');
+    if (jiraConfig?.baseUrl && jiraConfig?.email && jiraConfig?.apiToken) {
+      return {
+        baseUrl: jiraConfig.baseUrl,
+        email: jiraConfig.email,
+        apiToken: jiraConfig.apiToken,
+      };
+    }
+    return {
+      baseUrl: this.envBaseUrl,
+      email: this.envEmail,
+      apiToken: this.envApiToken,
+    };
+  }
+
+  private buildHeaders(email: string, apiToken: string): Record<string, string> {
+    const auth = Buffer.from(`${email}:${apiToken}`).toString('base64');
     return {
       Authorization: `Basic ${auth}`,
       'Content-Type': 'application/json',
@@ -31,6 +62,8 @@ export class JiraCommentsAdapter implements ChannelAdapter {
   }
 
   async sendMessage(params: SendMessageParams): Promise<Message> {
+    const { baseUrl, email, apiToken } = await this.getConnectionConfig();
+    const headers = this.buildHeaders(email, apiToken);
     const issueId = params.threadId;
 
     const body = {
@@ -47,10 +80,10 @@ export class JiraCommentsAdapter implements ChannelAdapter {
     };
 
     const response = await fetch(
-      `${this.baseUrl}/rest/api/3/issue/${issueId}/comment`,
+      `${baseUrl}/rest/api/3/issue/${issueId}/comment`,
       {
         method: 'POST',
-        headers: this.headers,
+        headers,
         body: JSON.stringify(body),
       },
     );
@@ -71,11 +104,13 @@ export class JiraCommentsAdapter implements ChannelAdapter {
   }
 
   async getThread(threadId: string): Promise<Message[]> {
+    const { baseUrl, email, apiToken } = await this.getConnectionConfig();
+    const headers = this.buildHeaders(email, apiToken);
     const issueId = threadId;
 
     const response = await fetch(
-      `${this.baseUrl}/rest/api/3/issue/${issueId}/comment`,
-      { headers: this.headers },
+      `${baseUrl}/rest/api/3/issue/${issueId}/comment`,
+      { headers },
     );
 
     if (!response.ok) {
@@ -99,13 +134,15 @@ export class JiraCommentsAdapter implements ChannelAdapter {
   }
 
   async updateMessage(messageId: string, content: string): Promise<Message> {
+    const { baseUrl, email, apiToken } = await this.getConnectionConfig();
+    const headers = this.buildHeaders(email, apiToken);
     const [issueId, commentId] = messageId.split(':');
 
     const response = await fetch(
-      `${this.baseUrl}/rest/api/3/issue/${issueId}/comment/${commentId}`,
+      `${baseUrl}/rest/api/3/issue/${issueId}/comment/${commentId}`,
       {
         method: 'PUT',
-        headers: this.headers,
+        headers,
         body: JSON.stringify({
           body: {
             type: 'doc',
@@ -137,13 +174,15 @@ export class JiraCommentsAdapter implements ChannelAdapter {
   }
 
   async deleteMessage(messageId: string): Promise<void> {
+    const { baseUrl, email, apiToken } = await this.getConnectionConfig();
+    const headers = this.buildHeaders(email, apiToken);
     const [issueId, commentId] = messageId.split(':');
 
     const response = await fetch(
-      `${this.baseUrl}/rest/api/3/issue/${issueId}/comment/${commentId}`,
+      `${baseUrl}/rest/api/3/issue/${issueId}/comment/${commentId}`,
       {
         method: 'DELETE',
-        headers: this.headers,
+        headers,
       },
     );
 

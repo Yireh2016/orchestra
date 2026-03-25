@@ -9,7 +9,9 @@ import { AdaptersModule } from './adapters/adapters.module';
 import { AgentRuntimeModule } from './agent-runtime/agent-runtime.module';
 import { PluginsModule } from './plugins/plugins.module';
 import { AuthModule } from './auth/auth.module';
+import { SettingsModule } from './settings/settings.module';
 import { HealthController } from './common/health.controller';
+import { IntegrationsModule } from './integrations/integrations.module';
 
 @Module({
   imports: [
@@ -18,6 +20,7 @@ import { HealthController } from './common/health.controller';
       load: [configuration],
     }),
     DatabaseModule,
+    IntegrationsModule,
     AdaptersModule.forRoot(),
     WorkflowModule,
     PhasesModule,
@@ -25,6 +28,7 @@ import { HealthController } from './common/health.controller';
     AgentRuntimeModule,
     PluginsModule,
     AuthModule,
+    SettingsModule,
   ],
   controllers: [HealthController],
 })

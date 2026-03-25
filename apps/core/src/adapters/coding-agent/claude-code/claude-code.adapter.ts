@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { spawn, ChildProcess } from 'child_process';
 import { randomUUID } from 'crypto';
+import { AdapterConfigService } from '../../adapter-config.service';
 import type {
   CodingAgentAdapter,
   AgentInstance,
@@ -15,8 +16,16 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
     { process: ChildProcess; instance: AgentInstance; output: string }
   >();
 
+  constructor(private readonly adapterConfig: AdapterConfigService) {}
+
+  private async getApiKey(): Promise<string | undefined> {
+    const dbConfig = await this.adapterConfig.getConfig('claude-code');
+    return dbConfig?.apiKey;
+  }
+
   async spawn(params: SpawnParams): Promise<AgentInstance> {
     const id = randomUUID();
+    const apiKey = await this.getApiKey();
 
     const instance: AgentInstance = {
       id,
@@ -26,12 +35,17 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
 
     this.instances.set(id, { process: null as any, instance, output: '' });
 
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      ...params.env,
+    };
+    if (apiKey) {
+      env.ANTHROPIC_API_KEY = apiKey;
+    }
+
     const child = spawn('claude', ['-p', params.prompt, '--output-format', 'json'], {
       cwd: params.workingDirectory,
-      env: {
-        ...process.env,
-        ...params.env,
-      },
+      env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 

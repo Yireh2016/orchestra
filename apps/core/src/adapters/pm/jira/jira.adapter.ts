@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { AdapterConfigService } from '../../adapter-config.service';
 import type {
   PMAdapter,
   Ticket,
@@ -10,20 +11,41 @@ import type {
 @Injectable()
 export class JiraAdapter implements PMAdapter {
   private readonly logger = new Logger(JiraAdapter.name);
-  private readonly baseUrl: string;
-  private readonly email: string;
-  private readonly apiToken: string;
+  private readonly envBaseUrl: string;
+  private readonly envEmail: string;
+  private readonly envApiToken: string;
 
-  constructor(private readonly configService: ConfigService) {
-    this.baseUrl = this.configService.get<string>('JIRA_BASE_URL', '');
-    this.email = this.configService.get<string>('JIRA_EMAIL', '');
-    this.apiToken = this.configService.get<string>('JIRA_API_TOKEN', '');
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly adapterConfig: AdapterConfigService,
+  ) {
+    this.envBaseUrl = this.configService.get<string>('JIRA_BASE_URL', '');
+    this.envEmail = this.configService.get<string>('JIRA_EMAIL', '');
+    this.envApiToken = this.configService.get<string>('JIRA_API_TOKEN', '');
   }
 
-  private get headers(): Record<string, string> {
-    const auth = Buffer.from(`${this.email}:${this.apiToken}`).toString(
-      'base64',
-    );
+  private async getConnectionConfig(): Promise<{
+    baseUrl: string;
+    email: string;
+    apiToken: string;
+  }> {
+    const dbConfig = await this.adapterConfig.getConfig('jira');
+    if (dbConfig?.baseUrl && dbConfig?.email && dbConfig?.apiToken) {
+      return {
+        baseUrl: dbConfig.baseUrl,
+        email: dbConfig.email,
+        apiToken: dbConfig.apiToken,
+      };
+    }
+    return {
+      baseUrl: this.envBaseUrl,
+      email: this.envEmail,
+      apiToken: this.envApiToken,
+    };
+  }
+
+  private buildHeaders(email: string, apiToken: string): Record<string, string> {
+    const auth = Buffer.from(`${email}:${apiToken}`).toString('base64');
     return {
       Authorization: `Basic ${auth}`,
       'Content-Type': 'application/json',
@@ -32,9 +54,12 @@ export class JiraAdapter implements PMAdapter {
   }
 
   async getTicket(ticketId: string): Promise<Ticket> {
+    const { baseUrl, email, apiToken } = await this.getConnectionConfig();
+    const headers = this.buildHeaders(email, apiToken);
+
     const response = await fetch(
-      `${this.baseUrl}/rest/api/3/issue/${ticketId}`,
-      { headers: this.headers },
+      `${baseUrl}/rest/api/3/issue/${ticketId}`,
+      { headers },
     );
 
     if (!response.ok) {
@@ -65,6 +90,9 @@ export class JiraAdapter implements PMAdapter {
     ticketId: string,
     update: Partial<Pick<Ticket, 'summary' | 'description' | 'assignee' | 'labels'>>,
   ): Promise<Ticket> {
+    const { baseUrl, email, apiToken } = await this.getConnectionConfig();
+    const headers = this.buildHeaders(email, apiToken);
+
     const fields: Record<string, unknown> = {};
 
     if (update.summary) fields.summary = update.summary;
@@ -82,9 +110,9 @@ export class JiraAdapter implements PMAdapter {
     }
     if (update.labels) fields.labels = update.labels;
 
-    await fetch(`${this.baseUrl}/rest/api/3/issue/${ticketId}`, {
+    await fetch(`${baseUrl}/rest/api/3/issue/${ticketId}`, {
       method: 'PUT',
-      headers: this.headers,
+      headers,
       body: JSON.stringify({ fields }),
     });
 
@@ -92,9 +120,12 @@ export class JiraAdapter implements PMAdapter {
   }
 
   async getComments(ticketId: string): Promise<TicketComment[]> {
+    const { baseUrl, email, apiToken } = await this.getConnectionConfig();
+    const headers = this.buildHeaders(email, apiToken);
+
     const response = await fetch(
-      `${this.baseUrl}/rest/api/3/issue/${ticketId}/comment`,
-      { headers: this.headers },
+      `${baseUrl}/rest/api/3/issue/${ticketId}/comment`,
+      { headers },
     );
 
     if (!response.ok) {
@@ -116,11 +147,14 @@ export class JiraAdapter implements PMAdapter {
   }
 
   async addComment(ticketId: string, body: string): Promise<TicketComment> {
+    const { baseUrl, email, apiToken } = await this.getConnectionConfig();
+    const headers = this.buildHeaders(email, apiToken);
+
     const response = await fetch(
-      `${this.baseUrl}/rest/api/3/issue/${ticketId}/comment`,
+      `${baseUrl}/rest/api/3/issue/${ticketId}/comment`,
       {
         method: 'POST',
-        headers: this.headers,
+        headers,
         body: JSON.stringify({
           body: {
             type: 'doc',
@@ -151,9 +185,12 @@ export class JiraAdapter implements PMAdapter {
   }
 
   async getTransitions(ticketId: string): Promise<TicketTransition[]> {
+    const { baseUrl, email, apiToken } = await this.getConnectionConfig();
+    const headers = this.buildHeaders(email, apiToken);
+
     const response = await fetch(
-      `${this.baseUrl}/rest/api/3/issue/${ticketId}/transitions`,
-      { headers: this.headers },
+      `${baseUrl}/rest/api/3/issue/${ticketId}/transitions`,
+      { headers },
     );
 
     if (!response.ok) {
@@ -173,11 +210,14 @@ export class JiraAdapter implements PMAdapter {
     ticketId: string,
     transitionId: string,
   ): Promise<void> {
+    const { baseUrl, email, apiToken } = await this.getConnectionConfig();
+    const headers = this.buildHeaders(email, apiToken);
+
     const response = await fetch(
-      `${this.baseUrl}/rest/api/3/issue/${ticketId}/transitions`,
+      `${baseUrl}/rest/api/3/issue/${ticketId}/transitions`,
       {
         method: 'POST',
-        headers: this.headers,
+        headers,
         body: JSON.stringify({
           transition: { id: transitionId },
         }),
@@ -190,11 +230,14 @@ export class JiraAdapter implements PMAdapter {
   }
 
   async searchTickets(query: string): Promise<Ticket[]> {
+    const { baseUrl, email, apiToken } = await this.getConnectionConfig();
+    const headers = this.buildHeaders(email, apiToken);
+
     const response = await fetch(
-      `${this.baseUrl}/rest/api/3/search`,
+      `${baseUrl}/rest/api/3/search`,
       {
         method: 'POST',
-        headers: this.headers,
+        headers,
         body: JSON.stringify({
           jql: query,
           maxResults: 50,

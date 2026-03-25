@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { AdapterConfigService } from '../../adapter-config.service';
 import type {
   CodeHostAdapter,
   PullRequest,
@@ -11,15 +12,27 @@ import type {
 export class GitHubAdapter implements CodeHostAdapter {
   private readonly logger = new Logger(GitHubAdapter.name);
   private readonly baseUrl = 'https://api.github.com';
-  private readonly token: string;
+  private readonly envToken: string;
 
-  constructor(private readonly configService: ConfigService) {
-    this.token = this.configService.get<string>('GITHUB_TOKEN', '');
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly adapterConfig: AdapterConfigService,
+  ) {
+    this.envToken = this.configService.get<string>('GITHUB_TOKEN', '');
   }
 
-  private get headers(): Record<string, string> {
+  private async getToken(): Promise<string> {
+    const dbConfig = await this.adapterConfig.getConfig('github');
+    if (dbConfig?.token) {
+      return dbConfig.token;
+    }
+    return this.envToken;
+  }
+
+  private async getHeaders(): Promise<Record<string, string>> {
+    const token = await this.getToken();
     return {
-      Authorization: `Bearer ${this.token}`,
+      Authorization: `Bearer ${token}`,
       Accept: 'application/vnd.github.v3+json',
       'Content-Type': 'application/json',
     };
@@ -32,11 +45,12 @@ export class GitHubAdapter implements CodeHostAdapter {
     targetBranch: string;
     repo: string;
   }): Promise<PullRequest> {
+    const headers = await this.getHeaders();
     const response = await fetch(
       `${this.baseUrl}/repos/${params.repo}/pulls`,
       {
         method: 'POST',
-        headers: this.headers,
+        headers,
         body: JSON.stringify({
           title: params.title,
           body: params.body,
@@ -55,9 +69,10 @@ export class GitHubAdapter implements CodeHostAdapter {
   }
 
   async getPullRequest(repo: string, prNumber: number): Promise<PullRequest> {
+    const headers = await this.getHeaders();
     const response = await fetch(
       `${this.baseUrl}/repos/${repo}/pulls/${prNumber}`,
-      { headers: this.headers },
+      { headers },
     );
 
     if (!response.ok) {
@@ -69,11 +84,12 @@ export class GitHubAdapter implements CodeHostAdapter {
   }
 
   async mergePullRequest(repo: string, prNumber: number): Promise<void> {
+    const headers = await this.getHeaders();
     const response = await fetch(
       `${this.baseUrl}/repos/${repo}/pulls/${prNumber}/merge`,
       {
         method: 'PUT',
-        headers: this.headers,
+        headers,
         body: JSON.stringify({ merge_method: 'squash' }),
       },
     );
@@ -87,9 +103,10 @@ export class GitHubAdapter implements CodeHostAdapter {
     repo: string,
     prNumber: number,
   ): Promise<ReviewComment[]> {
+    const headers = await this.getHeaders();
     const response = await fetch(
       `${this.baseUrl}/repos/${repo}/pulls/${prNumber}/comments`,
-      { headers: this.headers },
+      { headers },
     );
 
     if (!response.ok) {
@@ -109,9 +126,10 @@ export class GitHubAdapter implements CodeHostAdapter {
   }
 
   async getLatestCommitSha(repo: string, prNumber: number): Promise<string> {
+    const headers = await this.getHeaders();
     const response = await fetch(
       `${this.baseUrl}/repos/${repo}/pulls/${prNumber}`,
-      { headers: this.headers },
+      { headers },
     );
 
     if (!response.ok) {
@@ -128,12 +146,13 @@ export class GitHubAdapter implements CodeHostAdapter {
     comment: { body: string; path: string; line: number },
   ): Promise<ReviewComment> {
     const commitSha = await this.getLatestCommitSha(repo, prNumber);
+    const headers = await this.getHeaders();
 
     const response = await fetch(
       `${this.baseUrl}/repos/${repo}/pulls/${prNumber}/comments`,
       {
         method: 'POST',
-        headers: this.headers,
+        headers,
         body: JSON.stringify({
           body: comment.body,
           commit_id: commitSha,
@@ -165,9 +184,10 @@ export class GitHubAdapter implements CodeHostAdapter {
     branchName: string,
     fromRef: string,
   ): Promise<void> {
+    const headers = await this.getHeaders();
     const refResponse = await fetch(
       `${this.baseUrl}/repos/${repo}/git/ref/heads/${fromRef}`,
-      { headers: this.headers },
+      { headers },
     );
 
     if (!refResponse.ok) {
@@ -181,7 +201,7 @@ export class GitHubAdapter implements CodeHostAdapter {
       `${this.baseUrl}/repos/${repo}/git/refs`,
       {
         method: 'POST',
-        headers: this.headers,
+        headers,
         body: JSON.stringify({
           ref: `refs/heads/${branchName}`,
           sha,
@@ -199,9 +219,10 @@ export class GitHubAdapter implements CodeHostAdapter {
     path: string,
     ref: string,
   ): Promise<FileContent> {
+    const headers = await this.getHeaders();
     const response = await fetch(
       `${this.baseUrl}/repos/${repo}/contents/${path}?ref=${ref}`,
-      { headers: this.headers },
+      { headers },
     );
 
     if (!response.ok) {
@@ -222,9 +243,10 @@ export class GitHubAdapter implements CodeHostAdapter {
     path: string,
     ref: string,
   ): Promise<string[]> {
+    const headers = await this.getHeaders();
     const response = await fetch(
       `${this.baseUrl}/repos/${repo}/contents/${path}?ref=${ref}`,
-      { headers: this.headers },
+      { headers },
     );
 
     if (!response.ok) {
