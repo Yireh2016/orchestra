@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestra-web
+  namespace: orchestra
+  labels:
+    app.kubernetes.io/name: orchestra-web
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: orchestra
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: orchestra-web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: orchestra-web
+        app.kubernetes.io/component: frontend
+        app.kubernetes.io/part-of: orchestra
+    spec:
+      containers:
+        - name: web
+          image: orchestra-web:latest
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: orchestra-web-config
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestra-web
+  namespace: orchestra
+  labels:
+    app.kubernetes.io/name: orchestra-web
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: orchestra
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: orchestra-web
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orchestra-web-config
+  namespace: orchestra
+data:
+  NEXT_PUBLIC_API_URL: "http://orchestra-core:3001"
+  NEXTAUTH_URL: "https://orchestra.example.com"
+  NEXTAUTH_SECRET: "CHANGE_ME_IN_PRODUCTION"

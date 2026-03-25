@@ -1,0 +1,14 @@
+{
+  "name": "@orchestra/agent-runner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Orchestra coding agent task runner",
+  "main": "src/task-runner.js",
+  "scripts": {
+    "start": "node src/task-runner.js"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {}
+}

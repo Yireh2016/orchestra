@@ -1,0 +1,140 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum WorkflowState {
+  TRIGGERED
+  INTERVIEWING
+  RESEARCHING
+  PLANNING
+  EXECUTING
+  REVIEWING
+  DONE
+  PAUSED
+  FAILED
+}
+
+enum TaskStatus {
+  PENDING
+  QUEUED
+  RUNNING
+  PASSED
+  FAILED
+}
+
+enum IntegrationType {
+  PM
+  CODE_HOST
+  CHANNEL
+  CODING_AGENT
+}
+
+model Team {
+  id        String   @id @default(uuid())
+  name      String
+  settings  Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users              User[]
+  workflowTemplates  WorkflowTemplate[]
+  integrations       Integration[]
+  plugins            Plugin[]
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  name         String
+  authProvider String
+  teamId       String?
+  team         Team?    @relation(fields: [teamId], references: [id])
+  role         String   @default("member")
+  createdAt    DateTime @default(now())
+}
+
+model WorkflowTemplate {
+  id               String   @id @default(uuid())
+  name             String
+  description      String   @default("")
+  phases           Json     @default("[]")
+  triggerConfig    Json     @default("{}")
+  version          Int      @default(1)
+  teamId           String
+  team             Team     @relation(fields: [teamId], references: [id])
+  parentTemplateId String?
+  parentTemplate   WorkflowTemplate?  @relation("TemplateClones", fields: [parentTemplateId], references: [id])
+  clones           WorkflowTemplate[] @relation("TemplateClones")
+  isPublished      Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  workflowRuns WorkflowRun[]
+}
+
+model WorkflowRun {
+  id              String        @id @default(uuid())
+  templateId      String
+  template        WorkflowTemplate @relation(fields: [templateId], references: [id])
+  templateVersion Int
+  ticketId        String
+  state           WorkflowState @default(TRIGGERED)
+  phaseData       Json          @default("{}")
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  tasks     Task[]
+  auditLogs AuditLog[]
+}
+
+model Task {
+  id              String     @id @default(uuid())
+  workflowRunId   String
+  workflowRun     WorkflowRun @relation(fields: [workflowRunId], references: [id])
+  ticketId        String
+  branch          String
+  dependsOn       String[]
+  status          TaskStatus @default(PENDING)
+  gateResults     Json       @default("{}")
+  prUrl           String?
+  agentInstanceId String?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+}
+
+model Integration {
+  id          String          @id @default(uuid())
+  type        IntegrationType
+  adapterName String
+  config      Json            @default("{}")
+  teamId      String
+  team        Team            @relation(fields: [teamId], references: [id])
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+}
+
+model AuditLog {
+  id            String       @id @default(uuid())
+  workflowRunId String?
+  workflowRun   WorkflowRun? @relation(fields: [workflowRunId], references: [id])
+  action        String
+  actor         String
+  details       Json         @default("{}")
+  timestamp     DateTime     @default(now())
+}
+
+model Plugin {
+  id      String  @id @default(uuid())
+  name    String
+  type    String
+  version String
+  config  Json    @default("{}")
+  enabled Boolean @default(true)
+  teamId  String
+  team    Team    @relation(fields: [teamId], references: [id])
+}

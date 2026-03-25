@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: orchestra
+
+commonLabels:
+  app.kubernetes.io/managed-by: kustomize
+
+resources:
+  - namespace.yaml
+  - core-deployment.yaml
+  - web-deployment.yaml
+  - postgres-statefulset.yaml
+  - redis-deployment.yaml
+  - agent-job-template.yaml

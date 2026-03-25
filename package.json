@@ -1,0 +1,26 @@
+{
+  "name": "orchestra",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agentic coding workflow platform",
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "test": "turbo test",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "db:generate": "pnpm --filter @orchestra/core exec prisma generate",
+    "db:migrate": "pnpm --filter @orchestra/core exec prisma migrate dev",
+    "db:push": "pnpm --filter @orchestra/core exec prisma db push",
+    "clean": "turbo clean && rm -rf node_modules"
+  },
+  "devDependencies": {
+    "turbo": "^2.4.0",
+    "prettier": "^3.5.0",
+    "typescript": "^5.8.0"
+  },
+  "packageManager": "pnpm@10.28.2",
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

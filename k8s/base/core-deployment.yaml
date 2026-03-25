@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestra-core
+  namespace: orchestra
+  labels:
+    app.kubernetes.io/name: orchestra-core
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: orchestra
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: orchestra-core
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: orchestra-core
+        app.kubernetes.io/component: api
+        app.kubernetes.io/part-of: orchestra
+    spec:
+      containers:
+        - name: core
+          image: orchestra-core:latest
+          ports:
+            - name: http
+              containerPort: 3001
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: orchestra-core-config
+            - secretRef:
+                name: orchestra-core-secrets
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestra-core
+  namespace: orchestra
+  labels:
+    app.kubernetes.io/name: orchestra-core
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: orchestra
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: orchestra-core
+  ports:
+    - name: http
+      port: 3001
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orchestra-core-config
+  namespace: orchestra
+data:
+  NODE_ENV: production
+  PORT: "3001"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: orchestra-core-secrets
+  namespace: orchestra
+type: Opaque
+stringData:
+  DATABASE_URL: "postgresql://orchestra:CHANGE_ME@orchestra-postgres:5432/orchestra"
+  REDIS_URL: "redis://orchestra-redis:6379"
+  JWT_SECRET: "CHANGE_ME_IN_PRODUCTION"
