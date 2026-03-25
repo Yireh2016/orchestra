@@ -1,8 +1,9 @@
 "use client";
 
 import { Header } from "@/components/layout/header";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { getWorkflows, getTemplates, getAgents, Workflow, WorkflowTemplate, Agent } from "@/lib/api-client";
+import { useRealtimeEvents } from "@/hooks/use-realtime";
 
 function stateColor(state: string) {
   switch (state) {
@@ -27,28 +28,44 @@ function timeAgo(dateStr: string) {
   return `${days}d ago`;
 }
 
+const WORKFLOW_EVENT_TYPES = [
+  'workflow.started', 'workflow.paused', 'workflow.resumed', 'workflow.completed',
+  'phase.started', 'phase.completed',
+  'task.queued', 'task.started', 'task.completed', 'task.failed',
+  'agent.spawned', 'agent.completed', 'agent.stopped',
+];
+
 export default function DashboardPage() {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [templates, setTemplates] = useState<WorkflowTemplate[]>([]);
   const [agentsList, setAgentsList] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const { events, connected } = useRealtimeEvents(WORKFLOW_EVENT_TYPES);
+
+  const loadData = useCallback(async () => {
+    try {
+      const [wfs, tpls, ags] = await Promise.all([getWorkflows(), getTemplates(), getAgents()]);
+      setWorkflows(wfs);
+      setTemplates(tpls);
+      setAgentsList(ags);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load data");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    async function load() {
-      try {
-        const [wfs, tpls, ags] = await Promise.all([getWorkflows(), getTemplates(), getAgents()]);
-        setWorkflows(wfs);
-        setTemplates(tpls);
-        setAgentsList(ags);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to load data");
-      } finally {
-        setLoading(false);
-      }
+    loadData();
+  }, [loadData]);
+
+  // Refetch when relevant WebSocket events arrive
+  useEffect(() => {
+    if (events.length > 0) {
+      loadData();
     }
-    load();
-  }, []);
+  }, [events.length, loadData]);
 
   const activeWorkflows = workflows.filter(
     (w) => w.state !== "completed" && w.state !== "failed" && w.state !== "cancelled"
@@ -84,7 +101,15 @@ export default function DashboardPage() {
 
   return (
     <div className="p-8">
-      <Header title="Dashboard" />
+      <Header
+        title="Dashboard"
+        actions={
+          <div className="flex items-center gap-2 text-sm text-[var(--muted-foreground)]">
+            <span className={`inline-block h-2 w-2 rounded-full ${connected ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-500'}`} />
+            {connected ? 'Live' : 'Offline'}
+          </div>
+        }
+      />
 
       <div className="mt-8 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
         {stats.map((stat) => (

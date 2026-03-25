@@ -77,6 +77,22 @@ export interface AuditEntry {
   details: string;
 }
 
+export interface AuditLog {
+  id: string;
+  workflowRunId: string | null;
+  action: string;
+  actor: string;
+  details: Record<string, any>;
+  timestamp: string;
+}
+
+export interface PaginatedResponse<T> {
+  data: T[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
 // --- API Error ---
 
 export class ApiError extends Error {
@@ -310,4 +326,25 @@ export async function getAuditLog(params?: {
   if (params?.offset) query.set("offset", String(params.offset));
   const qs = query.toString();
   return request<AuditEntry[]>(`/audit${qs ? `?${qs}` : ""}`);
+}
+
+export async function getAuditLogs(params?: {
+  workflowRunId?: string;
+  action?: string;
+  actor?: string;
+  from?: string;
+  to?: string;
+  page?: number;
+  limit?: number;
+}): Promise<PaginatedResponse<AuditLog>> {
+  const searchParams = new URLSearchParams();
+  if (params?.workflowRunId) searchParams.set("workflowRunId", params.workflowRunId);
+  if (params?.action) searchParams.set("action", params.action);
+  if (params?.actor) searchParams.set("actor", params.actor);
+  if (params?.from) searchParams.set("from", params.from);
+  if (params?.to) searchParams.set("to", params.to);
+  if (params?.page) searchParams.set("page", String(params.page));
+  if (params?.limit) searchParams.set("limit", String(params.limit));
+  const query = searchParams.toString();
+  return request<PaginatedResponse<AuditLog>>(`/audit-logs${query ? `?${query}` : ""}`);
 }

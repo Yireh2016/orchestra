@@ -7,6 +7,7 @@ import type {
   AgentInstance,
   SpawnParams,
 } from '../adapters/interfaces/coding-agent-adapter.interface';
+import { EventBusService } from '../events/event-bus.service';
 
 interface PooledAgent {
   instance: AgentInstance;
@@ -28,6 +29,7 @@ export class AgentPoolService {
     @Inject(CODING_AGENT_ADAPTER)
     private readonly codingAgent: CodingAgentAdapter,
     private readonly configService: ConfigService,
+    private readonly eventBus: EventBusService,
   ) {
     this.maxConcurrency = this.configService.get<number>(
       'AGENT_MAX_CONCURRENCY',
@@ -69,6 +71,14 @@ export class AgentPoolService {
     });
     this.agentLogs.set(instance.id, []);
 
+    this.eventBus.emit({
+      type: 'agent.spawned',
+      workflowRunId,
+      taskId,
+      agentId: instance.id,
+      payload: {},
+    });
+
     return instance;
   }
 
@@ -87,6 +97,11 @@ export class AgentPoolService {
 
     this.activeAgents.delete(instanceId);
     // Keep logs for a while after release (they'll be GC'd eventually)
+    this.eventBus.emit({
+      type: 'agent.completed',
+      agentId: instanceId,
+      payload: {},
+    });
     this.logger.log(`Released agent ${instanceId}`);
   }
 
@@ -187,6 +202,11 @@ export class AgentPoolService {
     }
 
     this.activeAgents.delete(id);
+    this.eventBus.emit({
+      type: 'agent.stopped',
+      agentId: id,
+      payload: {},
+    });
   }
 
   // ── Log tracking ────────────────────────────────────────────────────────

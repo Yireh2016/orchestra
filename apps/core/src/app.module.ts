@@ -12,6 +12,8 @@ import { AuthModule } from './auth/auth.module';
 import { SettingsModule } from './settings/settings.module';
 import { HealthController } from './common/health.controller';
 import { IntegrationsModule } from './integrations/integrations.module';
+import { EventsModule } from './events/events.module';
+import { AuditModule } from './audit/audit.module';
 
 @Module({
   imports: [
@@ -29,6 +31,8 @@ import { IntegrationsModule } from './integrations/integrations.module';
     PluginsModule,
     AuthModule,
     SettingsModule,
+    EventsModule,
+    AuditModule,
   ],
   controllers: [HealthController],
 })

@@ -4,6 +4,7 @@ import { Queue, Worker, Job } from 'bullmq';
 import { PrismaService } from '../common/database/prisma.service';
 import { AgentPoolService } from './agent-pool.service';
 import { ContainerService, type RunTaskParams } from './container.service';
+import { EventBusService } from '../events/event-bus.service';
 
 export const TASK_QUEUE_NAME = 'orchestra-task-execution';
 
@@ -42,6 +43,7 @@ export class TaskQueueService implements OnModuleInit {
     private readonly prisma: PrismaService,
     private readonly agentPool: AgentPoolService,
     private readonly containerService: ContainerService,
+    private readonly eventBus: EventBusService,
   ) {}
 
   /**
@@ -102,6 +104,13 @@ export class TaskQueueService implements OnModuleInit {
       attempts: 1,
     });
 
+    this.eventBus.emit({
+      type: 'task.queued',
+      workflowRunId: data.workflowRunId,
+      taskId: data.taskId,
+      payload: {},
+    });
+
     this.logger.log(`Enqueued task ${data.taskId}`);
   }
 
@@ -143,6 +152,13 @@ export class TaskQueueService implements OnModuleInit {
     this.logger.log(`Processing task ${taskId}`);
 
     await this.markTaskStatus(taskId, 'RUNNING');
+
+    this.eventBus.emit({
+      type: 'task.started',
+      workflowRunId,
+      taskId,
+      payload: {},
+    });
 
     // Build RunTaskParams for the container service
     const callbackBaseUrl = this.configService.get<string>(
@@ -239,9 +255,19 @@ export class TaskQueueService implements OnModuleInit {
               this.logger.warn(
                 `Gate "${gate.name}" failed for task ${taskId}: ${error.message}`,
               );
+              this.eventBus.emit({
+                type: 'gate.failed',
+                taskId,
+                payload: { gateName: gate.name },
+              });
               resolve(false);
             } else {
               this.logger.log(`Gate "${gate.name}" passed for task ${taskId}`);
+              this.eventBus.emit({
+                type: 'gate.passed',
+                taskId,
+                payload: { gateName: gate.name },
+              });
               resolve(true);
             }
           },
@@ -274,6 +300,13 @@ export class TaskQueueService implements OnModuleInit {
     data: TaskJobData,
     status: 'PASSED' | 'FAILED',
   ): Promise<void> {
+    this.eventBus.emit({
+      type: status === 'PASSED' ? 'task.completed' : 'task.failed',
+      workflowRunId: data.workflowRunId,
+      taskId: data.taskId,
+      payload: { status },
+    });
+
     if (this.onTaskCompletedCallback) {
       try {
         await this.onTaskCompletedCallback({

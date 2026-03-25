@@ -2,12 +2,13 @@
 
 import { useState } from "react";
 
-interface Gate {
+export interface Gate {
   id: string;
   name: string;
   status: "passed" | "failed" | "pending";
   output: string | null;
   retries: number;
+  timestamp?: string | null;
 }
 
 interface GateStatusProps {
@@ -71,13 +72,31 @@ export function GateStatus({ gates }: GateStatusProps) {
             <div className="flex items-center gap-3">
               {statusIcon(gate.status)}
               <span className="text-sm font-medium text-[var(--foreground)]">{gate.name}</span>
+
+              {/* Retry dots indicator */}
               {gate.retries > 0 && (
-                <span className="rounded bg-[var(--muted)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--muted-foreground)]">
-                  {gate.retries} {gate.retries === 1 ? "retry" : "retries"}
-                </span>
+                <div className="flex items-center gap-1 ml-1" title={`${gate.retries} ${gate.retries === 1 ? "retry" : "retries"}`}>
+                  {Array.from({ length: Math.min(gate.retries, 5) }).map((_, i) => (
+                    <div
+                      key={i}
+                      className="h-1.5 w-1.5 rounded-full bg-amber-400"
+                    />
+                  ))}
+                  {gate.retries > 5 && (
+                    <span className="text-[10px] text-amber-400 ml-0.5">+{gate.retries - 5}</span>
+                  )}
+                  <span className="text-[10px] text-[var(--muted-foreground)] ml-1">
+                    {gate.retries} {gate.retries === 1 ? "retry" : "retries"}
+                  </span>
+                </div>
               )}
             </div>
             <div className="flex items-center gap-3">
+              {gate.timestamp && (
+                <span className="text-[10px] text-[var(--muted-foreground)] hidden sm:inline">
+                  {new Date(gate.timestamp).toLocaleString()}
+                </span>
+              )}
               <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${statusBadge(gate.status)}`}>
                 {gate.status}
               </span>
@@ -98,14 +117,21 @@ export function GateStatus({ gates }: GateStatusProps) {
             <div className="border-t border-[var(--border)] bg-[var(--muted)]/30 px-5 py-4">
               {gate.output ? (
                 <div>
-                  <p className="mb-1 text-xs font-medium text-[var(--muted-foreground)]">Output</p>
-                  <p className="rounded-lg bg-[var(--background)] px-3 py-2 font-mono text-sm text-[var(--foreground)]">
+                  <p className="mb-2 text-xs font-medium text-[var(--muted-foreground)]">Output</p>
+                  <pre className="overflow-x-auto rounded-lg bg-zinc-900 px-4 py-3 font-mono text-xs text-zinc-200 leading-relaxed whitespace-pre-wrap break-words">
                     {gate.output}
-                  </p>
+                  </pre>
                 </div>
               ) : (
                 <p className="text-sm text-[var(--muted-foreground)] italic">Awaiting evaluation...</p>
               )}
+
+              {gate.timestamp && (
+                <p className="mt-3 text-[10px] text-[var(--muted-foreground)]">
+                  Last run: {new Date(gate.timestamp).toLocaleString()}
+                </p>
+              )}
+
               {gate.status === "failed" && (
                 <button className="mt-3 rounded-lg bg-[var(--primary)] px-3 py-1.5 text-xs font-medium text-[var(--primary-foreground)] hover:opacity-90 transition-opacity">
                   Retry Gate

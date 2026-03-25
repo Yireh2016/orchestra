@@ -14,6 +14,7 @@ import { ExecutionHandler } from '../phases/execution/execution.handler';
 import { ReviewHandler } from '../phases/review/review.handler';
 import { TaskQueueService } from '../agent-runtime/task-queue.service';
 import { ContainerService } from '../agent-runtime/container.service';
+import { EventBusService } from '../events/event-bus.service';
 
 /**
  * Shape of a phase definition as stored in the template's `phases` JSON column.
@@ -56,6 +57,7 @@ export class WorkflowOrchestratorService implements OnModuleInit {
     private readonly reviewHandler: ReviewHandler,
     private readonly taskQueue: TaskQueueService,
     private readonly containerService: ContainerService,
+    private readonly eventBus: EventBusService,
   ) {}
 
   onModuleInit() {
@@ -97,6 +99,12 @@ export class WorkflowOrchestratorService implements OnModuleInit {
     const phases = template.phases as unknown as PhaseDefinition[];
     const firstPhase = this.findNextPhase(phases, null, run);
 
+    this.eventBus.emit({
+      type: 'workflow.started',
+      workflowRunId,
+      payload: {},
+    });
+
     if (firstPhase) {
       await this.transitionToPhase(workflowRunId, firstPhase);
     } else {
@@ -106,6 +114,11 @@ export class WorkflowOrchestratorService implements OnModuleInit {
         WorkflowState.DONE,
       );
       await this.logAudit(workflowRunId, 'workflow.completed', 'orchestrator');
+      this.eventBus.emit({
+        type: 'workflow.completed',
+        workflowRunId,
+        payload: {},
+      });
     }
   }
 
@@ -172,6 +185,12 @@ export class WorkflowOrchestratorService implements OnModuleInit {
       'orchestrator',
     );
 
+    this.eventBus.emit({
+      type: 'phase.completed',
+      workflowRunId,
+      payload: { phase: currentPhaseName },
+    });
+
     // Find and transition to the next phase
     const nextPhase = this.findNextPhase(phases, currentPhaseName, run);
     if (nextPhase) {
@@ -183,6 +202,11 @@ export class WorkflowOrchestratorService implements OnModuleInit {
         WorkflowState.DONE,
       );
       await this.logAudit(workflowRunId, 'workflow.completed', 'orchestrator');
+      this.eventBus.emit({
+        type: 'workflow.completed',
+        workflowRunId,
+        payload: {},
+      });
     }
   }
 
@@ -194,6 +218,13 @@ export class WorkflowOrchestratorService implements OnModuleInit {
     workflowRunId: string,
     taskId: string,
   ): Promise<void> {
+    this.eventBus.emit({
+      type: 'task.completed',
+      workflowRunId,
+      taskId,
+      payload: {},
+    });
+
     await this.handleEvent(workflowRunId, {
       type: 'task_completed',
       source: 'agent-runtime',
@@ -229,6 +260,11 @@ export class WorkflowOrchestratorService implements OnModuleInit {
       WorkflowState.PAUSED,
     );
     await this.logAudit(workflowRunId, 'workflow.paused', 'orchestrator');
+    this.eventBus.emit({
+      type: 'workflow.paused',
+      workflowRunId,
+      payload: { reason },
+    });
     this.logger.log(
       `Workflow ${workflowRunId} paused from state ${run.state}: ${reason}`,
     );
@@ -268,6 +304,11 @@ export class WorkflowOrchestratorService implements OnModuleInit {
       resumeState as WorkflowState,
     );
     await this.logAudit(workflowRunId, 'workflow.resumed', 'orchestrator');
+    this.eventBus.emit({
+      type: 'workflow.resumed',
+      workflowRunId,
+      payload: {},
+    });
     this.logger.log(
       `Workflow ${workflowRunId} resumed to state ${resumeState}`,
     );
@@ -393,6 +434,11 @@ export class WorkflowOrchestratorService implements OnModuleInit {
       `phase.started.${phase.handler}`,
       'orchestrator',
     );
+    this.eventBus.emit({
+      type: 'phase.started',
+      workflowRunId,
+      payload: { phase: phase.name },
+    });
     this.logger.log(
       `Workflow ${workflowRunId} transitioned to phase "${phase.handler}" (${targetState})`,
     );

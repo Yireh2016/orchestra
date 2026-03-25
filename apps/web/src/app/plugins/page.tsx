@@ -44,7 +44,14 @@ export default function PluginsPage() {
         }
       />
 
-      <div className="mt-8 grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3">
+      <div className="mt-6 flex items-start gap-3 rounded-xl border border-sky-500/25 bg-sky-500/10 p-4">
+        <span className="mt-0.5 text-sky-400 text-lg leading-none">i</span>
+        <p className="text-sm text-sky-300/90">
+          Plugin marketplace coming soon. Plugins will allow you to extend Orchestra with custom adapters and phase handlers.
+        </p>
+      </div>
+
+      <div className="mt-6 grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3">
         {plugins.map((plugin) => (
           <div
             key={plugin.id}

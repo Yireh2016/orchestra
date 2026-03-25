@@ -3,6 +3,7 @@
 import { Header } from "@/components/layout/header";
 import { useEffect, useState, useRef, useCallback } from "react";
 import { getAgents, getAgentLogs, stopAgent, Agent } from "@/lib/api-client";
+import { useRealtimeEvents } from "@/hooks/use-realtime";
 
 const MAX_AGENT_SLOTS = 10;
 
@@ -48,6 +49,8 @@ function truncateId(id: string): string {
   return id.length > 8 ? id.slice(0, 8) : id;
 }
 
+const AGENT_EVENT_TYPES = ['agent.spawned', 'agent.completed', 'agent.stopped'];
+
 export default function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -57,6 +60,7 @@ export default function AgentsPage() {
   const [logsLoading, setLogsLoading] = useState(false);
   const [stopping, setStopping] = useState<Set<string>>(new Set());
   const logEndRef = useRef<HTMLDivElement>(null);
+  const { events: agentEvents, connected } = useRealtimeEvents(AGENT_EVENT_TYPES);
 
   const fetchAgents = useCallback(async () => {
     try {
@@ -70,12 +74,17 @@ export default function AgentsPage() {
     }
   }, []);
 
-  // Auto-refresh agents every 5 seconds
+  // Initial load
   useEffect(() => {
     fetchAgents();
-    const interval = setInterval(fetchAgents, 5000);
-    return () => clearInterval(interval);
   }, [fetchAgents]);
+
+  // Refetch when agent WebSocket events arrive
+  useEffect(() => {
+    if (agentEvents.length > 0) {
+      fetchAgents();
+    }
+  }, [agentEvents.length, fetchAgents]);
 
   // Auto-refresh logs every 3 seconds while log viewer is open
   useEffect(() => {
@@ -157,6 +166,12 @@ export default function AgentsPage() {
       <Header
         title="Agents"
         breadcrumbs={[{ label: "Dashboard", href: "/" }, { label: "Agents" }]}
+        actions={
+          <div className="flex items-center gap-2 text-sm text-[var(--muted-foreground)]">
+            <span className={`inline-block h-2 w-2 rounded-full ${connected ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-500'}`} />
+            {connected ? 'Live' : 'Offline'}
+          </div>
+        }
       />
 
       {/* Summary Stats */}

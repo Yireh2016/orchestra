@@ -10,19 +10,20 @@
     "clean": "rm -rf .next"
   },
   "dependencies": {
+    "@orchestra/shared": "workspace:*",
     "next": "^15.0.0",
+    "next-auth": "5.0.0-beta.30",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "next-auth": "5.0.0-beta.30",
-    "@orchestra/shared": "workspace:*"
+    "socket.io-client": "^4.8.3"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.0.0",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "typescript": "^5.8.0",
+    "postcss": "^8.5.0",
     "tailwindcss": "^4.0.0",
-    "@tailwindcss/postcss": "^4.0.0",
-    "postcss": "^8.5.0"
+    "typescript": "^5.8.0"
   }
 }
