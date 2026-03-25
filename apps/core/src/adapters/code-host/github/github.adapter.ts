@@ -274,4 +274,19 @@ export class GitHubAdapter implements CodeHostAdapter {
       updatedAt: new Date(data.updated_at),
     };
   }
+
+  async addPRComment(repo: string, prNumber: number, body: string): Promise<void> {
+    const headers = await this.getHeaders();
+    const response = await fetch(
+      `${this.baseUrl}/repos/${repo}/issues/${prNumber}/comments`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ body }),
+      },
+    );
+    if (!response.ok) {
+      throw new Error(`GitHub addPRComment failed: ${response.status}`);
+    }
+  }
 }

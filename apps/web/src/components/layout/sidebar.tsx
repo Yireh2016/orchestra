@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
 import { useSession, signOut } from "next-auth/react";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 const navItems = [
   {
@@ -151,6 +152,11 @@ export function Sidebar() {
           </Link>
         ))}
       </nav>
+
+      {/* Theme Toggle */}
+      <div className="px-3 pb-1">
+        <ThemeToggle collapsed={collapsed} />
+      </div>
 
       {/* User */}
       <div className="border-t border-[var(--border)] p-3">

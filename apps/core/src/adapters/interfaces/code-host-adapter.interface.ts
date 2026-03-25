@@ -45,6 +45,7 @@ export interface CodeHostAdapter {
     prNumber: number,
     comment: { body: string; path: string; line: number },
   ): Promise<ReviewComment>;
+  addPRComment(repo: string, prNumber: number, body: string): Promise<void>;
   createBranch(repo: string, branchName: string, fromRef: string): Promise<void>;
   getFileContent(repo: string, path: string, ref: string): Promise<FileContent>;
   listFiles(repo: string, path: string, ref: string): Promise<string[]>;

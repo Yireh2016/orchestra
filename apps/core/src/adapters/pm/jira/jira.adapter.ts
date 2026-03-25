@@ -6,6 +6,7 @@ import type {
   Ticket,
   TicketComment,
   TicketTransition,
+  CreateTicketParams,
 } from '../../interfaces/pm-adapter.interface';
 
 @Injectable()
@@ -277,5 +278,51 @@ export class JiraAdapter implements PMAdapter {
       createdAt: new Date(issue.fields.created),
       updatedAt: new Date(issue.fields.updated),
     }));
+  }
+
+  async createTicket(params: CreateTicketParams): Promise<Ticket> {
+    const config = await this.getConnectionConfig();
+    const baseUrl = config.baseUrl;
+    const headers = {
+      'Authorization': `Basic ${Buffer.from(`${config.email}:${config.apiToken}`).toString('base64')}`,
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+    };
+    const body: any = {
+      fields: {
+        summary: params.summary,
+        description: { type: 'doc', version: 1, content: [{ type: 'paragraph', content: [{ type: 'text', text: params.description }] }] },
+        project: { key: params.parentTicketId?.split('-')[0] || 'PROJ' },
+        issuetype: { name: 'Task' },
+      },
+    };
+    if (params.labels?.length) body.fields.labels = params.labels;
+    if (params.priority) body.fields.priority = { name: params.priority };
+    if (params.parentTicketId) body.fields.parent = { key: params.parentTicketId };
+
+    const response = await fetch(`${baseUrl}/rest/api/3/issue`, { method: 'POST', headers, body: JSON.stringify(body) });
+    if (!response.ok) throw new Error(`Jira createTicket failed: ${response.status}`);
+    const data = (await response.json()) as any;
+    return this.getTicket(data.key);
+  }
+
+  async linkTickets(parentId: string, childId: string, linkType?: string): Promise<void> {
+    const config = await this.getConnectionConfig();
+    const baseUrl = config.baseUrl;
+    const headers = {
+      'Authorization': `Basic ${Buffer.from(`${config.email}:${config.apiToken}`).toString('base64')}`,
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+    };
+    const response = await fetch(`${baseUrl}/rest/api/3/issueLink`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        type: { name: linkType || 'Blocks' },
+        inwardIssue: { key: parentId },
+        outwardIssue: { key: childId },
+      }),
+    });
+    if (!response.ok) throw new Error(`Jira linkTickets failed: ${response.status}`);
   }
 }

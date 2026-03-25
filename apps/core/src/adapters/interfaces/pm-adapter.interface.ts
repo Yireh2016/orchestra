@@ -26,12 +26,22 @@ export interface TicketTransition {
   to: string;
 }
 
+export interface CreateTicketParams {
+  summary: string;
+  description: string;
+  parentTicketId?: string;
+  labels?: string[];
+  priority?: string;
+}
+
 export interface PMAdapter {
   getTicket(ticketId: string): Promise<Ticket>;
+  createTicket(params: CreateTicketParams): Promise<Ticket>;
   updateTicket(
     ticketId: string,
     update: Partial<Pick<Ticket, 'summary' | 'description' | 'status' | 'assignee' | 'labels'>>,
   ): Promise<Ticket>;
+  linkTickets(parentId: string, childId: string, linkType?: string): Promise<void>;
   getComments(ticketId: string): Promise<TicketComment[]>;
   addComment(ticketId: string, body: string): Promise<TicketComment>;
   getTransitions(ticketId: string): Promise<TicketTransition[]>;
