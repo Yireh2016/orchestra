@@ -1,0 +1,206 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orchestra-core-policy
+  namespace: orchestra
+  labels:
+    app.kubernetes.io/part-of: orchestra
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: orchestra-core
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow traffic from the ingress controller
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 3001
+    # Allow traffic from the web frontend
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: orchestra-web
+      ports:
+        - protocol: TCP
+          port: 3001
+    # Allow callback traffic from agent jobs
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: orchestra-agent
+      ports:
+        - protocol: TCP
+          port: 3001
+  egress:
+    # Allow access to PostgreSQL
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: orchestra-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Allow access to Redis
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: orchestra-redis
+      ports:
+        - protocol: TCP
+          port: 6379
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow outbound HTTPS (webhooks, external APIs)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orchestra-web-policy
+  namespace: orchestra
+  labels:
+    app.kubernetes.io/part-of: orchestra
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: orchestra-web
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow traffic from the ingress controller
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 3000
+  egress:
+    # Allow access to the core API
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: orchestra-core
+      ports:
+        - protocol: TCP
+          port: 3001
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orchestra-postgres-policy
+  namespace: orchestra
+  labels:
+    app.kubernetes.io/part-of: orchestra
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: orchestra-postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    # Only allow connections from the core API
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: orchestra-core
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orchestra-redis-policy
+  namespace: orchestra
+  labels:
+    app.kubernetes.io/part-of: orchestra
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: orchestra-redis
+  policyTypes:
+    - Ingress
+  ingress:
+    # Only allow connections from the core API
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: orchestra-core
+      ports:
+        - protocol: TCP
+          port: 6379
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orchestra-agent-policy
+  namespace: orchestra
+  labels:
+    app.kubernetes.io/part-of: orchestra
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: orchestra-agent
+  policyTypes:
+    - Egress
+  egress:
+    # Allow callback to core API
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: orchestra-core
+      ports:
+        - protocol: TCP
+          port: 3001
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow outbound HTTPS (git clone, API calls)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 22

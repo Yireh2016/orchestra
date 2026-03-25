@@ -10,8 +10,13 @@ import { ConfigService } from '@nestjs/config';
 import { Request, Response } from 'express';
 import { sign } from 'jsonwebtoken';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { ThrottleGuard } from '../common/guards/throttle.guard';
+
+// 20 requests per minute for auth endpoints
+const authThrottleGuard = new ThrottleGuard(20, 60000);
 
 @Controller('auth')
+@UseGuards(authThrottleGuard)
 export class AuthController {
   constructor(private readonly configService: ConfigService) {}
 

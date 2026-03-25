@@ -78,3 +78,50 @@ patches:
       - op: replace
         path: /data/NODE_ENV
         value: production
+
+  # HPA: higher min replicas for production
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: orchestra-core-hpa
+    patch: |
+      - op: replace
+        path: /spec/minReplicas
+        value: 3
+      - op: replace
+        path: /spec/maxReplicas
+        value: 20
+
+  # Agent jobs: higher resource limits in production
+  - target:
+      kind: Job
+      name: orchestra-agent-job
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: "1"
+            memory: 1Gi
+          limits:
+            cpu: "4"
+            memory: 4Gi
+
+  # PostgreSQL: production storage
+  - target:
+      kind: StatefulSet
+      name: orchestra-postgres
+    patch: |
+      - op: replace
+        path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+        value: 100Gi
+
+images:
+  - name: orchestra-core
+    newName: ghcr.io/orchestra-platform/core
+    newTag: stable
+  - name: orchestra-web
+    newName: ghcr.io/orchestra-platform/web
+    newTag: stable
+  - name: orchestra-agent
+    newName: ghcr.io/orchestra-platform/agent
+    newTag: stable

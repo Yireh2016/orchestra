@@ -10,8 +10,13 @@ import {
 } from '@nestjs/common';
 import { EventRouterService, InboundEvent } from './event-router.service';
 import { WebhookAuthGuard } from './webhook-auth.guard';
+import { ThrottleGuard } from '../common/guards/throttle.guard';
+
+// 1000 requests per minute for webhooks
+const webhookThrottleGuard = new ThrottleGuard(1000, 60000);
 
 @Controller('webhooks')
+@UseGuards(webhookThrottleGuard)
 export class WebhookController {
   private readonly logger = new Logger(WebhookController.name);
 

@@ -1,0 +1,30 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: orchestra-ingress
+  namespace: orchestra
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/websocket-services: "orchestra-core"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [orchestra.example.com]
+      secretName: orchestra-tls
+  rules:
+    - host: orchestra.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend: { service: { name: orchestra-core, port: { number: 3001 } } }
+          - path: /events
+            pathType: Prefix
+            backend: { service: { name: orchestra-core, port: { number: 3001 } } }
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: orchestra-web, port: { number: 3000 } } }
