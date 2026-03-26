@@ -17,6 +17,7 @@ enum WorkflowState {
   DONE
   PAUSED
   FAILED
+  CANCELLED
 }
 
 enum TaskStatus {

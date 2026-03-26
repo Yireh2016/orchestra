@@ -163,7 +163,7 @@ export async function transitionWorkflow(
 ): Promise<Workflow> {
   return request<Workflow>(`/workflows/${id}/transition`, {
     method: "PATCH",
-    body: JSON.stringify({ state }),
+    body: JSON.stringify({ targetState: state.toUpperCase() }),
   });
 }
 

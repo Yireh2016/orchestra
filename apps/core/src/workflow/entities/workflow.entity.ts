@@ -8,6 +8,7 @@ export enum WorkflowState {
   DONE = 'DONE',
   PAUSED = 'PAUSED',
   FAILED = 'FAILED',
+  CANCELLED = 'CANCELLED',
 }
 
 export interface WorkflowRun {
@@ -24,39 +25,45 @@ export interface WorkflowRun {
 
 /**
  * Valid forward transitions in the workflow state machine.
- * PAUSED and FAILED can be reached from any active state.
+ * PAUSED, FAILED, and CANCELLED can be reached from any active state.
  */
 export const VALID_TRANSITIONS: Record<WorkflowState, WorkflowState[]> = {
   [WorkflowState.TRIGGERED]: [
     WorkflowState.INTERVIEWING,
     WorkflowState.PAUSED,
     WorkflowState.FAILED,
+    WorkflowState.CANCELLED,
   ],
   [WorkflowState.INTERVIEWING]: [
     WorkflowState.RESEARCHING,
     WorkflowState.PAUSED,
     WorkflowState.FAILED,
+    WorkflowState.CANCELLED,
   ],
   [WorkflowState.RESEARCHING]: [
     WorkflowState.PLANNING,
     WorkflowState.PAUSED,
     WorkflowState.FAILED,
+    WorkflowState.CANCELLED,
   ],
   [WorkflowState.PLANNING]: [
     WorkflowState.EXECUTING,
     WorkflowState.PAUSED,
     WorkflowState.FAILED,
+    WorkflowState.CANCELLED,
   ],
   [WorkflowState.EXECUTING]: [
     WorkflowState.REVIEWING,
     WorkflowState.PAUSED,
     WorkflowState.FAILED,
+    WorkflowState.CANCELLED,
   ],
   [WorkflowState.REVIEWING]: [
     WorkflowState.DONE,
     WorkflowState.EXECUTING,
     WorkflowState.PAUSED,
     WorkflowState.FAILED,
+    WorkflowState.CANCELLED,
   ],
   [WorkflowState.DONE]: [],
   [WorkflowState.PAUSED]: [
@@ -66,6 +73,8 @@ export const VALID_TRANSITIONS: Record<WorkflowState, WorkflowState[]> = {
     WorkflowState.PLANNING,
     WorkflowState.EXECUTING,
     WorkflowState.REVIEWING,
+    WorkflowState.CANCELLED,
   ],
   [WorkflowState.FAILED]: [],
+  [WorkflowState.CANCELLED]: [],
 };
