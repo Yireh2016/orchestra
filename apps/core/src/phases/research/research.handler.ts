@@ -10,6 +10,7 @@ import { CODING_AGENT_ADAPTER } from '../../adapters/interfaces/coding-agent-ada
 import type { CodingAgentAdapter } from '../../adapters/interfaces/coding-agent-adapter.interface';
 import { PM_ADAPTER } from '../../adapters/interfaces/pm-adapter.interface';
 import type { PMAdapter } from '../../adapters/interfaces/pm-adapter.interface';
+import { RepoClonerService } from '../../common/repo-cloner.service';
 
 @Injectable()
 export class ResearchHandler implements PhaseHandler {
@@ -20,6 +21,7 @@ export class ResearchHandler implements PhaseHandler {
     @Inject(CODING_AGENT_ADAPTER)
     private readonly codingAgent: CodingAgentAdapter,
     @Inject(PM_ADAPTER) private readonly pmAdapter: PMAdapter,
+    private readonly repoCloner: RepoClonerService,
   ) {}
 
   private getProjectContext(workflowRun: WorkflowRun): string {
@@ -50,11 +52,19 @@ export class ResearchHandler implements PhaseHandler {
       phaseData.interview ??
       'No specification available.';
 
-    // Determine working directory from workflow metadata if available
-    const workingDirectory =
-      phaseData.research?.metadata?.repoPath ??
-      phaseData.repoPath ??
-      '.';
+    // Clone the target repo so Claude Code analyzes the right codebase
+    let workingDirectory = process.cwd();
+    let clonedDir: string | null = null;
+    const repoInfo = this.repoCloner.getPrimaryRepoUrl(phaseData);
+    if (repoInfo) {
+      try {
+        clonedDir = await this.repoCloner.cloneRepo(repoInfo.url, repoInfo.branch);
+        workingDirectory = clonedDir;
+        this.logger.log(`Research will analyze cloned repo at ${clonedDir}`);
+      } catch (err) {
+        this.logger.warn(`Failed to clone repo for research: ${(err as Error).message} — falling back to local dir`);
+      }
+    }
 
     const projectContext = this.getProjectContext(workflowRun);
 
@@ -90,6 +100,11 @@ Output a structured research document with:
       this.logger.warn(
         `Failed to spawn coding agent for research: ${(err as Error).message}`,
       );
+    }
+
+    // Cleanup cloned repo
+    if (clonedDir) {
+      this.repoCloner.cleanupClone(clonedDir);
     }
 
     await this.prisma.workflowRun.update({

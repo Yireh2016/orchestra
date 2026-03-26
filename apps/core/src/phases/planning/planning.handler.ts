@@ -11,6 +11,7 @@ import { CODING_AGENT_ADAPTER } from '../../adapters/interfaces/coding-agent-ada
 import type { CodingAgentAdapter } from '../../adapters/interfaces/coding-agent-adapter.interface';
 import { PM_ADAPTER } from '../../adapters/interfaces/pm-adapter.interface';
 import type { PMAdapter } from '../../adapters/interfaces/pm-adapter.interface';
+import { RepoClonerService } from '../../common/repo-cloner.service';
 
 @Injectable()
 export class PlanningHandler implements PhaseHandler {
@@ -21,6 +22,7 @@ export class PlanningHandler implements PhaseHandler {
     private readonly dagBuilder: DagBuilderService,
     @Inject(CODING_AGENT_ADAPTER) private readonly codingAgent: CodingAgentAdapter,
     @Inject(PM_ADAPTER) private readonly pmAdapter: PMAdapter,
+    private readonly repoCloner: RepoClonerService,
   ) {}
 
   private getProjectContext(workflowRun: WorkflowRun): string {
@@ -93,12 +95,26 @@ Respond with ONLY a JSON object in this exact format:
 
 Respond with ONLY the JSON.`;
 
+    // Clone the target repo so Claude Code analyzes the right codebase
+    let clonedDir: string | null = null;
+    let workingDirectory = process.cwd();
+    const repoInfo = this.repoCloner.getPrimaryRepoUrl(phaseData);
+    if (repoInfo) {
+      try {
+        clonedDir = await this.repoCloner.cloneRepo(repoInfo.url, repoInfo.branch);
+        workingDirectory = clonedDir;
+        this.logger.log(`Planning will analyze cloned repo at ${clonedDir}`);
+      } catch (err) {
+        this.logger.warn(`Failed to clone repo for planning: ${(err as Error).message}`);
+      }
+    }
+
     let plan: { overview: string; tasks: any[] } | null = null;
 
     try {
       const agent = await this.codingAgent.spawn({
         prompt,
-        workingDirectory: process.cwd(),
+        workingDirectory,
         timeout: 120000,
       });
 
@@ -114,6 +130,8 @@ Respond with ONLY the JSON.`;
       }
     } catch (err) {
       this.logger.warn(`Planning agent failed: ${(err as Error).message}`);
+    } finally {
+      if (clonedDir) this.repoCloner.cleanupClone(clonedDir);
     }
 
     if (plan && plan.tasks?.length > 0) {

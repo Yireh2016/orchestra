@@ -10,6 +10,7 @@ import { ReviewHandler } from './review/review.handler';
 import { AdaptersModule } from '../adapters/adapters.module';
 import { WorkflowModule } from '../workflow/workflow.module';
 import { AgentRuntimeModule } from '../agent-runtime/agent-runtime.module';
+import { RepoClonerService } from '../common/repo-cloner.service';
 
 @Module({
   imports: [AdaptersModule, forwardRef(() => WorkflowModule), AgentRuntimeModule],
@@ -19,6 +20,7 @@ import { AgentRuntimeModule } from '../agent-runtime/agent-runtime.module';
     ResearchHandler,
     PlanningHandler,
     DagBuilderService,
+    RepoClonerService,
     ExecutionHandler,
     GateRunnerService,
     ReviewHandler,
