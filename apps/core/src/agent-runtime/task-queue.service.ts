@@ -29,6 +29,7 @@ export type TaskCompletedCallback = (data: {
   taskId: string;
   workflowRunId: string;
   status: 'PASSED' | 'FAILED';
+  branchPushed?: boolean;
 }) => Promise<void>;
 
 @Injectable()
@@ -239,10 +240,10 @@ export class TaskQueueService implements OnModuleInit {
 
     // Task succeeded
     const elapsed = Date.now() - startTime;
-    this.logger.log(`Task ${taskId} completed successfully in ${elapsed}ms`);
+    this.logger.log(`Task ${taskId} completed successfully in ${elapsed}ms (branchPushed: ${result.branchPushed ?? false})`);
     await this.markTaskStatus(taskId, 'PASSED');
     await this.evaluateDownstream(job.data);
-    await this.notifyCompletion(job.data, 'PASSED');
+    await this.notifyCompletion(job.data, 'PASSED', result.branchPushed);
   }
 
   /**
@@ -318,12 +319,13 @@ export class TaskQueueService implements OnModuleInit {
   private async notifyCompletion(
     data: TaskJobData,
     status: 'PASSED' | 'FAILED',
+    branchPushed?: boolean,
   ): Promise<void> {
     this.eventBus.emit({
       type: status === 'PASSED' ? 'task.completed' : 'task.failed',
       workflowRunId: data.workflowRunId,
       taskId: data.taskId,
-      payload: { status },
+      payload: { status, branchPushed },
     });
 
     if (this.onTaskCompletedCallback) {
@@ -332,6 +334,7 @@ export class TaskQueueService implements OnModuleInit {
           taskId: data.taskId,
           workflowRunId: data.workflowRunId,
           status,
+          branchPushed,
         });
       } catch (error: any) {
         this.logger.error(

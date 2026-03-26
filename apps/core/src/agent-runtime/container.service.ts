@@ -27,6 +27,7 @@ export interface TaskRunResult {
   success: boolean;
   output: string;
   exitCode: number;
+  branchPushed?: boolean;
 }
 
 @Injectable()
@@ -152,6 +153,7 @@ export class ContainerService {
       } catch { /* not JSON-wrapped */ }
 
       // 6. Check if any files were changed
+      let branchPushed = false;
       if (params.repoUrl) {
         const diffResult = await this.exec('git', ['status', '--porcelain'], { cwd: tmpDir });
         const hasChanges = diffResult.stdout.trim().length > 0;
@@ -159,20 +161,19 @@ export class ContainerService {
         if (hasChanges) {
           this.logger.log(`[process] Task ${taskId}: changes detected, committing...`);
 
-          // Configure git user for the commit
           await this.exec('git', ['config', 'user.email', 'orchestra@bot.dev'], { cwd: tmpDir });
           await this.exec('git', ['config', 'user.name', 'Orchestra Bot'], { cwd: tmpDir });
 
-          // Stage all changes, commit, push
           await this.exec('git', ['add', '-A'], { cwd: tmpDir });
           await this.exec('git', ['commit', '-m', `[Orchestra] ${params.taskDefinition.title}\n\nAutomated by Orchestra workflow.`], { cwd: tmpDir });
 
           this.logger.log(`[process] Task ${taskId}: pushing branch ${params.branch}...`);
           await this.exec('git', ['push', 'origin', params.branch], { cwd: tmpDir });
 
+          branchPushed = true;
           this.logger.log(`[process] Task ${taskId}: branch pushed successfully`);
         } else {
-          this.logger.log(`[process] Task ${taskId}: no file changes detected by Claude Code`);
+          this.logger.log(`[process] Task ${taskId}: no file changes — no PR needed`);
         }
       }
 
@@ -181,7 +182,7 @@ export class ContainerService {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       } catch { /* ignore cleanup errors */ }
 
-      return { success: claudeResult.exitCode === 0, output, exitCode: claudeResult.exitCode };
+      return { success: claudeResult.exitCode === 0, output, exitCode: claudeResult.exitCode, branchPushed };
 
     } catch (err) {
       this.logger.error(`[process] Task ${taskId} failed: ${(err as Error).message}`);

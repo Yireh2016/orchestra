@@ -53,12 +53,14 @@ export class ExecutionHandler implements PhaseHandler {
     const repos = ctx.repositories as any[];
     if (repos.length === 0) return null;
 
-    const repoUrl = repos[0].url as string;
+    // Pick primary repo, or first one marked as primary, or fallback to first
+    const primaryRepo = repos.find((r: any) => r.primary) ?? repos[0];
+    const repoUrl = primaryRepo.url as string;
     // Extract owner/repo from URL: https://github.com/owner/repo(.git)
     const match = repoUrl.match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
     const slug = match ? match[1] : repoUrl;
 
-    return { slug, url: repoUrl, defaultBranch: repos[0].defaultBranch || 'main' };
+    return { slug, url: repoUrl, defaultBranch: primaryRepo.defaultBranch || 'main' };
   }
 
   async start(workflowRun: WorkflowRun): Promise<void> {
@@ -207,8 +209,9 @@ export class ExecutionHandler implements PhaseHandler {
 
         this.logger.log(`Task ${taskId} passed all gates`);
 
-        // Create PR immediately for this task if branch was pushed
-        if (task) {
+        // Create PR only if the branch was actually pushed (code changes exist)
+        const branchPushed = event.payload.branchPushed as boolean | undefined;
+        if (task && branchPushed) {
           try {
             const pr = await this.codeHost.createPullRequest({
               title: `[Orchestra] ${task.ticketId}: ${planTask?.title ?? task.ticketId}`,
