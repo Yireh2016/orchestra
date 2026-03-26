@@ -129,8 +129,14 @@ export class InterviewHandler implements PhaseHandler {
         spec: '',
       };
 
-      const commentText = (event.payload.comment ?? event.payload.content) as string;
-      const author = (event.payload.author ?? event.source) as string;
+      // Handle both webhook format (payload.comment = string) and polling format (payload.comment = { body, author })
+      const rawComment = event.payload.comment;
+      const commentText = typeof rawComment === 'object' && rawComment !== null
+        ? (rawComment as any).body ?? ''
+        : (rawComment ?? event.payload.content ?? '') as string;
+      const author = typeof rawComment === 'object' && rawComment !== null
+        ? (rawComment as any).author ?? event.source
+        : (event.payload.author ?? event.source) as string;
 
       const response = {
         author,
