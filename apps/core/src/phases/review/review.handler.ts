@@ -233,9 +233,8 @@ If you cannot check out the branch or see the diff, still provide a review based
 
     if (event.type === 'review_submitted' || event.type === 'pr.reviewed') {
       const prUrl = event.payload.prUrl as string;
-      const pr = (review.prs as PRReviewState[]).find(
-        (p) => p.prUrl === prUrl,
-      );
+      const prs = (review.prs ?? []) as PRReviewState[];
+      const pr = prs.find((p) => p.prUrl === prUrl);
       if (!pr) return;
 
       const isApproved = event.payload.approved as boolean;
@@ -378,9 +377,8 @@ Post your review comments as structured JSON:
 
     if (event.type === 'pr_merged' || event.type === 'pr.merged') {
       const prUrl = event.payload.prUrl as string;
-      const pr = (review.prs as PRReviewState[]).find(
-        (p) => p.prUrl === prUrl,
-      );
+      const prs2 = (review.prs ?? []) as PRReviewState[];
+      const pr = prs2.find((p) => p.prUrl === prUrl);
       if (pr) {
         pr.reviewStatus = 'merged';
         pr.mergedAt = new Date().toISOString();
