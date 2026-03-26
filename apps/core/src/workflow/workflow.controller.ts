@@ -74,4 +74,10 @@ export class WorkflowController {
     await this.orchestrator.resumeWorkflow(id);
     return { status: 'resumed', workflowRunId: id };
   }
+
+  @Post(':id/rerun')
+  async rerun(@Param('id') id: string) {
+    await this.orchestrator.rerunWorkflow(id);
+    return { status: 'rerunning', workflowRunId: id };
+  }
 }

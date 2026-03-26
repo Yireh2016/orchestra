@@ -45,9 +45,12 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
         .find(p => { try { require('fs').accessSync(p); return true; } catch { return false; } })
       || 'claude';
 
-    this.logger.log(`Spawning Claude Code agent ${id} (bin: ${claudeBin}, timeout: ${params.timeout ?? 300000}ms)`);
+    this.logger.log(`Spawning Claude Code agent ${id} (bin: ${claudeBin}, timeout: ${params.timeout ?? 300000}ms, prompt length: ${params.prompt.length} chars)`);
 
     try {
+      this.logger.log(`Agent ${id} execFile starting...`);
+      const execStartTime = Date.now();
+
       const result = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
         execFile(
           claudeBin,
@@ -65,6 +68,11 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
               if (realStderr) this.logger.warn(`Agent ${id} stderr: ${realStderr}`);
             }
             if (error && !stdout) {
+              const exitCode = (error as any).code ?? 'unknown';
+              const signal = (error as any).signal ?? 'none';
+              this.logger.error(
+                `Agent ${id} command failed — exitCode: ${exitCode}, signal: ${signal}, stderr (first 500): ${(stderr || '').slice(0, 500)}`,
+              );
               reject(error);
             } else {
               resolve({ stdout: stdout ?? '', stderr: stderr ?? '' });
@@ -72,6 +80,9 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
           },
         );
       });
+
+      const execElapsed = Date.now() - execStartTime;
+      this.logger.log(`Agent ${id} execFile completed in ${execElapsed}ms (stdout: ${result.stdout.length} bytes)`);
 
       // Extract the actual AI response from Claude Code's JSON wrapper
       let output = result.stdout;
@@ -82,6 +93,7 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
         }
       } catch {
         // Not JSON-wrapped, use as-is
+        this.logger.warn(`Agent ${id} output is not valid JSON — using raw output (${output.length} bytes)`);
       }
 
       instance.status = 'completed';

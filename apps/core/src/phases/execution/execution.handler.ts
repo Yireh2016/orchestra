@@ -80,19 +80,24 @@ export class ExecutionHandler implements PhaseHandler {
       where: { workflowRunId: workflowRun.id },
     });
 
-    // Find root tasks (no dependencies)
-    const rootTasks = tasks.filter(
-      (t) => t.dependsOn.length === 0 && t.status === 'PENDING',
-    );
+    // Find tasks that are ready to execute:
+    // - PENDING with no deps (root tasks), OR
+    // - PENDING with all deps PASSED (unblocked by previous run)
+    const passedTaskIds = new Set(tasks.filter(t => t.status === 'PASSED').map(t => t.ticketId));
+    const readyTasks = tasks.filter(t => {
+      if (t.status !== 'PENDING') return false;
+      if (t.dependsOn.length === 0) return true;
+      return t.dependsOn.every(dep => passedTaskIds.has(dep));
+    });
 
     this.logger.log(
-      `Found ${rootTasks.length} root tasks out of ${tasks.length} total`,
+      `Found ${readyTasks.length} ready tasks out of ${tasks.length} total (${passedTaskIds.size} already passed)`,
     );
 
     const projectContext = this.getProjectContext(workflowRun);
 
-    // For each root task: create branch and queue
-    for (const task of rootTasks) {
+    // For each ready task: create branch and queue
+    for (const task of readyTasks) {
       try {
         await this.codeHost.createBranch(repoSlug, task.branch, baseBranch);
       } catch (err) {

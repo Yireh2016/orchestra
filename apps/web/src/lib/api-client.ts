@@ -183,6 +183,10 @@ export async function resumeWorkflow(id: string): Promise<Workflow> {
   });
 }
 
+export async function rerunWorkflow(id: string): Promise<{ status: string; workflowRunId: string }> {
+  return request<{ status: string; workflowRunId: string }>(`/workflows/${id}/rerun`, { method: 'POST' });
+}
+
 // --- Tasks ---
 
 export async function getWorkflowTasks(workflowId: string): Promise<Task[]> {

@@ -314,9 +314,131 @@ export class WorkflowOrchestratorService implements OnModuleInit {
     );
   }
 
+  /**
+   * Rerun a workflow by inspecting existing artifacts in phaseData and
+   * resuming from the furthest completed phase. Idempotent — safe to call
+   * multiple times.
+   */
+  async rerunWorkflow(workflowRunId: string): Promise<void> {
+    const run = await this.prisma.workflowRun.findUniqueOrThrow({
+      where: { id: workflowRunId },
+    });
+    const phaseData = (run.phaseData ?? {}) as Record<string, any>;
+    const template = await this.prisma.workflowTemplate.findUniqueOrThrow({
+      where: { id: run.templateId },
+    });
+    const phases = template.phases as unknown as PhaseDefinition[];
+
+    this.logger.log(`Rerunning workflow ${workflowRunId} — inspecting existing artifacts...`);
+
+    // Ensure project context is loaded
+    if (run.projectId && !phaseData._projectContext) {
+      const project = await this.prisma.project.findUnique({ where: { id: run.projectId } });
+      if (project) {
+        phaseData._projectContext = {
+          name: project.name,
+          description: project.description,
+          repositories: project.repositories,
+          context: project.context,
+          pmProjectKey: project.pmProjectKey,
+        };
+      }
+    }
+
+    // Clear the _completedPhases so phase completion checks work again
+    delete phaseData._completedPhases;
+
+    // Determine where to resume based on existing artifacts
+    const resumePhase = this.determineResumePoint(phaseData, phases);
+
+    this.logger.log(`Resume point determined: ${resumePhase?.handler ?? 'start from beginning'}`);
+
+    // Reset to TRIGGERED so the state machine can transition forward
+    await this.prisma.workflowRun.update({
+      where: { id: workflowRunId },
+      data: {
+        phaseData: phaseData as any,
+        state: WorkflowState.TRIGGERED,
+      },
+    });
+
+    if (resumePhase) {
+      // Transition directly to the resume phase
+      await this.transitionToPhase(workflowRunId, resumePhase);
+    } else {
+      // Start from the beginning
+      await this.startWorkflow(workflowRunId);
+    }
+
+    await this.logAudit(workflowRunId, 'workflow.rerun', 'orchestrator');
+  }
+
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
+
+  /**
+   * Inspect phaseData artifacts in reverse order to find the furthest
+   * completed phase, then return the NEXT phase to resume from.
+   */
+  private determineResumePoint(
+    phaseData: Record<string, any>,
+    phases: PhaseDefinition[],
+  ): PhaseDefinition | null {
+    const interview = phaseData.interview;
+    const research = phaseData.research;
+    const planning = phaseData.planning;
+    const execution = phaseData.execution;
+
+    // If execution completed → resume at review
+    if (execution?.status === 'completed' || execution?.allTasksPassed) {
+      const reviewPhase = phases.find(p => p.handler === 'review');
+      if (reviewPhase) {
+        this.logger.log('Artifacts found: execution completed → resuming at review');
+        return reviewPhase;
+      }
+    }
+
+    // If plan with tasks exists and was approved → resume at execution
+    if (planning?.tasks?.length > 0 && (planning.status === 'approved' || planning.status === 'completed' || planning.status === 'awaiting_approval')) {
+      // Mark planning as approved if it was awaiting
+      if (planning.status === 'awaiting_approval') {
+        planning.status = 'approved';
+        planning.approvedAt = new Date().toISOString();
+      }
+      const executionPhase = phases.find(p => p.handler === 'execution');
+      if (executionPhase) {
+        this.logger.log(`Artifacts found: plan with ${planning.tasks.length} tasks → resuming at execution`);
+        return executionPhase;
+      }
+    }
+
+    // If research artifacts exist → resume at planning
+    if (research?.artifacts?.research || research?.status === 'completed') {
+      const planningPhase = phases.find(p => p.handler === 'planning');
+      if (planningPhase) {
+        this.logger.log('Artifacts found: research completed → resuming at planning');
+        return planningPhase;
+      }
+    }
+
+    // If spec exists → resume at research
+    if (interview?.spec && (interview.status === 'approved' || interview.status === 'completed' || interview.status === 'spec_ready')) {
+      // Mark as approved if it was just spec_ready
+      if (interview.status === 'spec_ready') {
+        interview.status = 'approved';
+        interview.approvedAt = new Date().toISOString();
+      }
+      const researchPhase = phases.find(p => p.handler === 'research');
+      if (researchPhase) {
+        this.logger.log('Artifacts found: spec exists → resuming at research');
+        return researchPhase;
+      }
+    }
+
+    // No artifacts — start from beginning
+    return null;
+  }
 
   /** Map a WorkflowState enum value to its corresponding phase handler name. */
   private stateToPhaseHandler(state: string): string | null {
@@ -419,9 +541,10 @@ export class WorkflowOrchestratorService implements OnModuleInit {
       data: { phaseData },
     });
 
-    // Load project context into phaseData so all phase handlers can access it
-    if (run.projectId) {
-      const project = await this.prisma.project.findUnique({ where: { id: run.projectId } });
+    // Always refresh project context before starting a phase
+    const latestRun = await this.prisma.workflowRun.findUniqueOrThrow({ where: { id: workflowRunId } });
+    if (latestRun.projectId) {
+      const project = await this.prisma.project.findUnique({ where: { id: latestRun.projectId } });
       if (project) {
         phaseData._projectContext = {
           name: project.name,

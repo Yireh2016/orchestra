@@ -148,8 +148,11 @@ export class TaskQueueService implements OnModuleInit {
 
   private async processTask(job: Job<TaskJobData>): Promise<void> {
     const { taskId, workflowRunId, prompt, workingDirectory } = job.data;
+    const startTime = Date.now();
 
-    this.logger.log(`Processing task ${taskId}`);
+    this.logger.log(
+      `Processing task ${taskId} for workflow ${workflowRunId} (repo: ${job.data.repoUrl || 'none'}, branch: ${job.data.branch || 'main'})`,
+    );
 
     await this.markTaskStatus(taskId, 'RUNNING');
 
@@ -181,17 +184,31 @@ export class TaskQueueService implements OnModuleInit {
       timeout: job.data.timeout || 600_000,
     };
 
+    // Watchdog timer — log if task processing takes longer than 2 minutes
+    const watchdog = setTimeout(() => {
+      this.logger.warn(
+        `Task ${taskId} (workflow ${workflowRunId}) has been processing for over 2 minutes — possible stuck task`,
+      );
+    }, 2 * 60 * 1000);
+
     let result;
     try {
       result = await this.containerService.runTask(runParams);
+      this.logger.log(
+        `ContainerService.runTask completed for task ${taskId}: success=${result.success}, exitCode=${result.exitCode}, output length=${(result.output || '').length}`,
+      );
     } catch (error: any) {
+      clearTimeout(watchdog);
+      const elapsed = Date.now() - startTime;
       this.logger.error(
-        `Task ${taskId} execution error: ${error.message}`,
+        `Task ${taskId} (workflow ${workflowRunId}) execution error after ${elapsed}ms: ${error.message}`,
       );
       await this.markTaskStatus(taskId, 'FAILED');
       await this.notifyCompletion(job.data, 'FAILED');
       throw error; // Let BullMQ mark the job as failed
     }
+
+    clearTimeout(watchdog);
 
     // Store the output in the agent pool logs
     if (result.output) {
@@ -199,8 +216,9 @@ export class TaskQueueService implements OnModuleInit {
     }
 
     if (!result.success) {
+      const elapsed = Date.now() - startTime;
       this.logger.warn(
-        `Task ${taskId} failed (exit code ${result.exitCode})`,
+        `Task ${taskId} (workflow ${workflowRunId}) failed after ${elapsed}ms — exit code ${result.exitCode}, output length: ${(result.output || '').length}`,
       );
       await this.markTaskStatus(taskId, 'FAILED');
       await this.notifyCompletion(job.data, 'FAILED');
@@ -220,7 +238,8 @@ export class TaskQueueService implements OnModuleInit {
     }
 
     // Task succeeded
-    this.logger.log(`Task ${taskId} completed successfully`);
+    const elapsed = Date.now() - startTime;
+    this.logger.log(`Task ${taskId} completed successfully in ${elapsed}ms`);
     await this.markTaskStatus(taskId, 'PASSED');
     await this.evaluateDownstream(job.data);
     await this.notifyCompletion(job.data, 'PASSED');

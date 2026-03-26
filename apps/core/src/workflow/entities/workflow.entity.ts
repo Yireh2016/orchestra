@@ -30,6 +30,10 @@ export interface WorkflowRun {
 export const VALID_TRANSITIONS: Record<WorkflowState, WorkflowState[]> = {
   [WorkflowState.TRIGGERED]: [
     WorkflowState.INTERVIEWING,
+    WorkflowState.RESEARCHING,
+    WorkflowState.PLANNING,
+    WorkflowState.EXECUTING,
+    WorkflowState.REVIEWING,
     WorkflowState.PAUSED,
     WorkflowState.FAILED,
     WorkflowState.CANCELLED,
@@ -65,7 +69,9 @@ export const VALID_TRANSITIONS: Record<WorkflowState, WorkflowState[]> = {
     WorkflowState.FAILED,
     WorkflowState.CANCELLED,
   ],
-  [WorkflowState.DONE]: [],
+  [WorkflowState.DONE]: [
+    WorkflowState.TRIGGERED,
+  ],
   [WorkflowState.PAUSED]: [
     WorkflowState.TRIGGERED,
     WorkflowState.INTERVIEWING,
@@ -75,6 +81,10 @@ export const VALID_TRANSITIONS: Record<WorkflowState, WorkflowState[]> = {
     WorkflowState.REVIEWING,
     WorkflowState.CANCELLED,
   ],
-  [WorkflowState.FAILED]: [],
-  [WorkflowState.CANCELLED]: [],
+  [WorkflowState.FAILED]: [
+    WorkflowState.TRIGGERED,
+  ],
+  [WorkflowState.CANCELLED]: [
+    WorkflowState.TRIGGERED,
+  ],
 };

@@ -78,13 +78,24 @@ export class ContainerService {
     const prompt = this.buildPrompt(params);
     const timeout = params.timeout || 600_000;
 
+    // Find claude binary path
+    const claudeBin = process.env.CLAUDE_BIN || 'claude';
     this.logger.log(
-      `[process] Spawning claude CLI for task ${params.taskId}`,
+      `[process] Spawning claude CLI for task ${params.taskId} (binary: ${claudeBin}, timeout: ${timeout}ms)`,
     );
 
+    const startTime = Date.now();
+
     return new Promise<TaskRunResult>((resolve) => {
-      execFile(
-        'claude',
+      // Set up a timeout warning at 80% of the limit
+      const warningTimeout = setTimeout(() => {
+        this.logger.warn(
+          `[process] Task ${params.taskId} has been running for ${Math.round(timeout * 0.8 / 1000)}s — approaching ${timeout / 1000}s timeout`,
+        );
+      }, timeout * 0.8);
+
+      const child = execFile(
+        claudeBin,
         ['-p', prompt, '--output-format', 'json'],
         {
           cwd: params.workingDirectory || process.cwd(),
@@ -93,25 +104,38 @@ export class ContainerService {
           timeout,
         },
         (error, stdout, stderr) => {
+          clearTimeout(warningTimeout);
+          const elapsed = Date.now() - startTime;
+
           if (error) {
+            const exitCode = typeof (error as any).code === 'number'
+              ? (error as any).code
+              : 1;
+            const signal = (error as any).signal || 'none';
             this.logger.warn(
-              `[process] Task ${params.taskId} failed: ${error.message}`,
+              `[process] Task ${params.taskId} failed after ${elapsed}ms — exitCode: ${exitCode}, signal: ${signal}, stderr length: ${(stderr || '').length}`,
             );
+            if (stderr) {
+              this.logger.warn(
+                `[process] Task ${params.taskId} stderr (first 500 chars): ${stderr.slice(0, 500)}`,
+              );
+            }
             resolve({
               success: false,
               output: stderr || error.message,
-              exitCode:
-                typeof (error as any).code === 'number'
-                  ? (error as any).code
-                  : 1,
+              exitCode,
             });
           } else {
             this.logger.log(
-              `[process] Task ${params.taskId} completed successfully`,
+              `[process] Task ${params.taskId} completed successfully in ${elapsed}ms — stdout: ${(stdout || '').length} bytes, stderr: ${(stderr || '').length} bytes`,
             );
             resolve({ success: true, output: stdout, exitCode: 0 });
           }
         },
+      );
+
+      this.logger.log(
+        `[process] Task ${params.taskId} process started (pid: ${child.pid})`,
       );
     });
   }
