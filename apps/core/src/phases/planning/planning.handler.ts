@@ -20,16 +20,37 @@ export class PlanningHandler implements PhaseHandler {
     @Inject(CHANNEL_ADAPTER) private readonly channel: ChannelAdapter,
   ) {}
 
+  private getProjectContext(workflowRun: WorkflowRun): string {
+    const phaseData = workflowRun.phaseData as Record<string, any>;
+    const ctx = phaseData._projectContext;
+    if (!ctx) return '';
+    return [
+      '## Project Context',
+      `Project: ${ctx.name}`,
+      ctx.description ? `Description: ${ctx.description}` : '',
+      `Repositories: ${(ctx.repositories as any[])?.map((r: any) => `${r.url} (branch: ${r.defaultBranch || 'main'})`).join(', ') || 'None'}`,
+      '',
+      ctx.context || '',
+      '---',
+      '',
+    ].filter(Boolean).join('\n');
+  }
+
   async start(workflowRun: WorkflowRun): Promise<void> {
     this.logger.log(`Starting planning phase for run ${workflowRun.id}`);
 
     const phaseData = workflowRun.phaseData as Record<string, any>;
     const researchOutput = phaseData.research?.output ?? '';
+    const projectContext = this.getProjectContext(workflowRun);
 
     try {
+      const planningMessage = projectContext
+        ? `Planning phase started. Based on research, I'll generate an implementation plan.\n\n${projectContext}\nResearch summary available. Please provide any additional constraints or task breakdown preferences.`
+        : `Planning phase started. Based on research, I'll generate an implementation plan.\n\nResearch summary available. Please provide any additional constraints or task breakdown preferences.`;
+
       await this.channel.sendMessage({
         threadId: workflowRun.ticketId,
-        content: `Planning phase started. Based on research, I'll generate an implementation plan.\n\nResearch summary available. Please provide any additional constraints or task breakdown preferences.`,
+        content: planningMessage,
       });
     } catch (err) {
       this.logger.warn(`Failed to send planning start message: ${(err as Error).message}`);

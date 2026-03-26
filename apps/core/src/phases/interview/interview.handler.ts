@@ -52,6 +52,7 @@ export class InterviewHandler implements PhaseHandler {
 
     // Use AI to analyze the ticket and decide: ask questions or go straight to spec
     const analysis = await this.analyzeTicketCompleteness(
+      workflowRun,
       ticketTitle,
       ticketDescription,
       ticketLabels,
@@ -267,6 +268,26 @@ export class InterviewHandler implements PhaseHandler {
   }
 
   // ---------------------------------------------------------------------------
+  // Project context helper
+  // ---------------------------------------------------------------------------
+
+  private getProjectContext(workflowRun: WorkflowRun): string {
+    const phaseData = workflowRun.phaseData as Record<string, any>;
+    const ctx = phaseData._projectContext;
+    if (!ctx) return '';
+    return [
+      '## Project Context',
+      `Project: ${ctx.name}`,
+      ctx.description ? `Description: ${ctx.description}` : '',
+      `Repositories: ${(ctx.repositories as any[])?.map((r: any) => `${r.url} (branch: ${r.defaultBranch || 'main'})`).join(', ') || 'None'}`,
+      '',
+      ctx.context || '',
+      '---',
+      '',
+    ].filter(Boolean).join('\n');
+  }
+
+  // ---------------------------------------------------------------------------
   // AI-powered analysis
   // ---------------------------------------------------------------------------
 
@@ -275,6 +296,7 @@ export class InterviewHandler implements PhaseHandler {
    * or generate targeted questions for missing information.
    */
   private async analyzeTicketCompleteness(
+    workflowRun: WorkflowRun,
     title: string,
     description: string,
     labels: string[],
@@ -287,7 +309,9 @@ export class InterviewHandler implements PhaseHandler {
       ...comments.map(c => `Comment by ${c.author}: ${c.body}`),
     ].filter(Boolean).join('\n\n');
 
-    const prompt = `You are analyzing a project ticket to determine if it has enough information to write a technical specification.
+    const projectContext = this.getProjectContext(workflowRun);
+
+    const prompt = `${projectContext}You are analyzing a project ticket to determine if it has enough information to write a technical specification.
 
 Here is all available information about this ticket:
 
@@ -353,7 +377,9 @@ Respond with ONLY the JSON, no other text.`;
       ...(interview.responses ?? []).map((r: any) => `  ${r.author}: ${r.content}`),
     ].join('\n');
 
-    const prompt = `You are evaluating whether an interview for a coding task has gathered enough information.
+    const projectContext = this.getProjectContext(workflowRun);
+
+    const prompt = `${projectContext}You are evaluating whether an interview for a coding task has gathered enough information.
 
 Here is the conversation so far:
 
@@ -480,10 +506,12 @@ Respond with ONLY the JSON.`;
       ...(interview.responses ?? []).map((r: any) => `${r.author}: ${r.content}`),
     ].join('\n');
 
+    const projectContext = this.getProjectContext(workflowRun);
+
     let spec = '';
     try {
       const agent = await this.codingAgent.spawn({
-        prompt: `Synthesize a clear technical specification from the following interview responses. Include: ## Summary, ## Requirements, ## Acceptance Criteria, ## Scope\n\n${allInfo}`,
+        prompt: `${projectContext}Synthesize a clear technical specification from the following interview responses. Include: ## Summary, ## Requirements, ## Acceptance Criteria, ## Scope\n\n${allInfo}`,
         workingDirectory: process.cwd(),
         timeout: 60000,
       });

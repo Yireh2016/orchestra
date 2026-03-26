@@ -14,6 +14,7 @@ import { HealthController } from './common/health.controller';
 import { IntegrationsModule } from './integrations/integrations.module';
 import { EventsModule } from './events/events.module';
 import { AuditModule } from './audit/audit.module';
+import { ProjectsModule } from './projects/projects.module';
 import { RequestLoggerMiddleware } from './common/middleware/request-logger.middleware';
 
 @Module({
@@ -34,6 +35,7 @@ import { RequestLoggerMiddleware } from './common/middleware/request-logger.midd
     SettingsModule,
     EventsModule,
     AuditModule,
+    ProjectsModule,
   ],
   controllers: [HealthController],
 })

@@ -309,6 +309,76 @@ export async function testIntegration(
   );
 }
 
+// --- Projects ---
+
+export interface ProjectRepository {
+  url: string;
+  defaultBranch?: string;
+  path?: string;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  description: string;
+  repositories: ProjectRepository[];
+  pmProjectKey: string | null;
+  integrations: Record<string, string>;
+  context: string;
+  contextGeneratedAt: string | null;
+  teamId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function getProjects(): Promise<Project[]> {
+  return request<Project[]>("/projects");
+}
+
+export async function getProject(id: string): Promise<Project> {
+  return request<Project>(`/projects/${id}`);
+}
+
+export async function createProject(data: {
+  name: string;
+  description?: string;
+  repositories: ProjectRepository[];
+  pmProjectKey?: string;
+  teamId?: string;
+}): Promise<Project> {
+  return request<Project>("/projects", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateProject(
+  id: string,
+  data: Partial<{
+    name: string;
+    description: string;
+    repositories: ProjectRepository[];
+    pmProjectKey: string;
+    teamId: string;
+    context: string;
+  }>
+): Promise<Project> {
+  return request<Project>(`/projects/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteProject(id: string): Promise<void> {
+  return request<void>(`/projects/${id}`, { method: "DELETE" });
+}
+
+export async function scanProject(id: string): Promise<Project> {
+  return request<Project>(`/projects/${id}/scan`, {
+    method: "POST",
+  });
+}
+
 // --- Audit ---
 
 export async function getAuditLog(params?: {

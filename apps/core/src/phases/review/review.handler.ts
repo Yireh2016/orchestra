@@ -39,6 +39,22 @@ export class ReviewHandler implements PhaseHandler {
     @Inject(PM_ADAPTER) private readonly pm: PMAdapter,
   ) {}
 
+  private getProjectContext(workflowRun: WorkflowRun): string {
+    const phaseData = workflowRun.phaseData as Record<string, any>;
+    const ctx = phaseData._projectContext;
+    if (!ctx) return '';
+    return [
+      '## Project Context',
+      `Project: ${ctx.name}`,
+      ctx.description ? `Description: ${ctx.description}` : '',
+      `Repositories: ${(ctx.repositories as any[])?.map((r: any) => `${r.url} (branch: ${r.defaultBranch || 'main'})`).join(', ') || 'None'}`,
+      '',
+      ctx.context || '',
+      '---',
+      '',
+    ].filter(Boolean).join('\n');
+  }
+
   async start(workflowRun: WorkflowRun): Promise<void> {
     this.logger.log(`Starting review phase for run ${workflowRun.id}`);
 
@@ -93,7 +109,8 @@ export class ReviewHandler implements PhaseHandler {
       reviewData.prs.push(prState);
 
       // Spawn reviewer coding agent
-      const reviewPrompt = `Review this pull request. Check for:
+      const projectContext = this.getProjectContext(workflowRun);
+      const reviewPrompt = `${projectContext}Review this pull request. Check for:
 - Code correctness and potential bugs
 - Adherence to the specification
 - Code style and best practices
@@ -249,7 +266,8 @@ Post your review comments as structured JSON:
                 ) || pt.title === task.ticketId,
             );
 
-            const reReviewPrompt = `Review this pull request again after changes were made. Check for:
+            const reReviewProjectContext = this.getProjectContext(workflowRun);
+            const reReviewPrompt = `${reReviewProjectContext}Review this pull request again after changes were made. Check for:
 - Code correctness and potential bugs
 - Adherence to the specification
 - Code style and best practices

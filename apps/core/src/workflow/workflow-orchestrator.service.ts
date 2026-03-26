@@ -419,11 +419,34 @@ export class WorkflowOrchestratorService implements OnModuleInit {
       data: { phaseData },
     });
 
+    // Load project context into phaseData so all phase handlers can access it
+    if (run.projectId) {
+      const project = await this.prisma.project.findUnique({ where: { id: run.projectId } });
+      if (project) {
+        phaseData._projectContext = {
+          name: project.name,
+          description: project.description,
+          repositories: project.repositories,
+          context: project.context,
+          pmProjectKey: project.pmProjectKey,
+        };
+        await this.prisma.workflowRun.update({
+          where: { id: workflowRunId },
+          data: { phaseData },
+        });
+      }
+    }
+
+    // Re-fetch run so the handler receives up-to-date phaseData (including _projectContext)
+    const updatedRun = await this.prisma.workflowRun.findUniqueOrThrow({
+      where: { id: workflowRunId },
+    });
+
     // Kick off the phase handler
     const handler = this.phaseHandlers.get(phase.handler);
     if (handler) {
       try {
-        await handler.start(run as any);
+        await handler.start(updatedRun as any);
       } catch (err) {
         this.logger.warn(`Failed to start phase handler "${phase.handler}" for workflow ${workflowRunId}: ${(err as Error).message}`);
       }

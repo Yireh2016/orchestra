@@ -5,9 +5,11 @@ import { useState, useEffect } from "react";
 import {
   getWorkflows,
   getTemplates,
+  getProjects,
   createWorkflow,
   Workflow,
   WorkflowTemplate,
+  Project,
 } from "@/lib/api-client";
 
 const states = ["All", "pending", "running", "paused", "gated", "completed", "failed", "cancelled"];
@@ -39,18 +41,21 @@ export default function WorkflowsPage() {
   const [filter, setFilter] = useState("All");
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [templates, setTemplates] = useState<WorkflowTemplate[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
   const [newTicketId, setNewTicketId] = useState("");
   const [newTemplateId, setNewTemplateId] = useState("");
+  const [newProjectId, setNewProjectId] = useState("");
   const [creating, setCreating] = useState(false);
 
   const loadData = async () => {
     try {
-      const [wfs, tpls] = await Promise.all([getWorkflows(), getTemplates()]);
+      const [wfs, tpls, projs] = await Promise.all([getWorkflows(), getTemplates(), getProjects()]);
       setWorkflows(wfs);
       setTemplates(tpls);
+      setProjects(projs);
       if (tpls.length > 0 && !newTemplateId) {
         setNewTemplateId(tpls[0].id);
       }
@@ -70,9 +75,17 @@ export default function WorkflowsPage() {
     if (!newTemplateId || !newTicketId.trim()) return;
     setCreating(true);
     try {
-      await createWorkflow({ templateId: newTemplateId, ticketId: newTicketId.trim() });
+      const payload: { templateId: string; ticketId: string; context?: Record<string, unknown> } = {
+        templateId: newTemplateId,
+        ticketId: newTicketId.trim(),
+      };
+      if (newProjectId) {
+        payload.context = { projectId: newProjectId };
+      }
+      await createWorkflow(payload);
       setShowModal(false);
       setNewTicketId("");
+      setNewProjectId("");
       setLoading(true);
       await loadData();
     } catch (e) {
@@ -123,6 +136,26 @@ export default function WorkflowsPage() {
           <div className="w-full max-w-md rounded-xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-xl">
             <h3 className="text-lg font-semibold text-[var(--foreground)]">Create New Workflow</h3>
             <div className="mt-4 space-y-4">
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-[var(--foreground)]">Project</label>
+                {projects.length === 0 ? (
+                  <p className="text-sm text-[var(--muted-foreground)]">
+                    No projects found.{" "}
+                    <a href="/projects" className="text-[var(--primary)] hover:underline">Create a project first</a>
+                  </p>
+                ) : (
+                  <select
+                    value={newProjectId}
+                    onChange={(e) => setNewProjectId(e.target.value)}
+                    className="w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                  >
+                    <option value="">Select a project (optional)</option>
+                    {projects.map((p) => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                )}
+              </div>
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-[var(--foreground)]">Template</label>
                 <select

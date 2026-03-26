@@ -40,7 +40,9 @@ export class WorkflowController {
   }
 
   @Post()
-  async create(@Body() body: { templateId: string; ticketId: string }) {
+  async create(
+    @Body() body: { templateId: string; ticketId: string; projectId?: string },
+  ) {
     const run = await this.workflowService.create(body);
     try {
       await this.orchestrator.startWorkflow(run.id);

@@ -17,6 +17,7 @@ export interface WorkflowRun {
   ticketId: string;
   state: WorkflowState;
   phaseData: Record<string, unknown>;
+  projectId?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }

@@ -4,3 +4,4 @@
 - [user_jainer.md](user_jainer.md) — User profile: experience, preferences, collaboration style
 - [feedback_ui_theme.md](feedback_ui_theme.md) — Low priority: add light/dark mode toggle
 - [project_slack_pending.md](project_slack_pending.md) — Slack integration pending org approval
+- [project_concept_design.md](project_concept_design.md) — Project entity design: multi-repo, auto-context, PM key detection

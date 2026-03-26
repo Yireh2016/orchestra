@@ -30,12 +30,38 @@ export class ExecutionHandler implements PhaseHandler {
     @Inject(PM_ADAPTER) private readonly pm: PMAdapter,
   ) {}
 
+  private getProjectContext(workflowRun: WorkflowRun): string {
+    const phaseData = workflowRun.phaseData as Record<string, any>;
+    const ctx = phaseData._projectContext;
+    if (!ctx) return '';
+    return [
+      '## Project Context',
+      `Project: ${ctx.name}`,
+      ctx.description ? `Description: ${ctx.description}` : '',
+      `Repositories: ${(ctx.repositories as any[])?.map((r: any) => `${r.url} (branch: ${r.defaultBranch || 'main'})`).join(', ') || 'None'}`,
+      '',
+      ctx.context || '',
+      '---',
+      '',
+    ].filter(Boolean).join('\n');
+  }
+
+  private getRepoFromProjectContext(workflowRun: WorkflowRun): { url: string; defaultBranch: string } | null {
+    const phaseData = workflowRun.phaseData as Record<string, any>;
+    const ctx = phaseData._projectContext;
+    if (!ctx || !ctx.repositories) return null;
+    const repos = ctx.repositories as any[];
+    if (repos.length === 0) return null;
+    return { url: repos[0].url, defaultBranch: repos[0].defaultBranch || 'main' };
+  }
+
   async start(workflowRun: WorkflowRun): Promise<void> {
     this.logger.log(`Starting execution phase for run ${workflowRun.id}`);
 
     const phaseData = workflowRun.phaseData as Record<string, any>;
-    const repo = phaseData.repo ?? phaseData.planning?.repo ?? '';
-    const baseBranch = phaseData.baseBranch ?? 'main';
+    const projectRepo = this.getRepoFromProjectContext(workflowRun);
+    const repo = projectRepo?.url ?? phaseData.repo ?? phaseData.planning?.repo ?? '';
+    const baseBranch = projectRepo?.defaultBranch ?? phaseData.baseBranch ?? 'main';
 
     // Load all tasks for this workflow run
     const tasks = await this.prisma.task.findMany({
@@ -51,6 +77,8 @@ export class ExecutionHandler implements PhaseHandler {
       `Found ${rootTasks.length} root tasks out of ${tasks.length} total`,
     );
 
+    const projectContext = this.getProjectContext(workflowRun);
+
     // For each root task: create branch and queue
     for (const task of rootTasks) {
       try {
@@ -65,7 +93,7 @@ export class ExecutionHandler implements PhaseHandler {
         await this.taskQueue.enqueue({
           taskId: task.id,
           workflowRunId: workflowRun.id,
-          prompt: `Implement the following task on branch ${task.branch}:\n\nTicket: ${task.ticketId}\n\nFollow existing code patterns and conventions.`,
+          prompt: `${projectContext}Implement the following task on branch ${task.branch}:\n\nTicket: ${task.ticketId}\n\nFollow existing code patterns and conventions.`,
           workingDirectory: '.',
           repoUrl: repo,
           branch: task.branch,

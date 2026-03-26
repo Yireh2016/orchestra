@@ -45,6 +45,7 @@ model Team {
   workflowTemplates  WorkflowTemplate[]
   integrations       Integration[]
   plugins            Plugin[]
+  projects           Project[]
 }
 
 model User {
@@ -88,6 +89,9 @@ model WorkflowRun {
   phaseData       Json          @default("{}")
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
+
+  projectId    String?
+  project      Project?  @relation(fields: [projectId], references: [id])
 
   tasks     Task[]
   auditLogs AuditLog[]
@@ -138,4 +142,21 @@ model Plugin {
   enabled Boolean @default(true)
   teamId  String
   team    Team    @relation(fields: [teamId], references: [id])
+}
+
+model Project {
+  id                 String    @id @default(uuid())
+  name               String
+  description        String    @default("")
+  repositories       Json      @default("[]")
+  pmProjectKey       String?
+  integrations       Json      @default("{}")
+  context            String    @default("")
+  contextGeneratedAt DateTime?
+  teamId             String?
+  team               Team?     @relation(fields: [teamId], references: [id])
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  workflowRuns WorkflowRun[]
 }

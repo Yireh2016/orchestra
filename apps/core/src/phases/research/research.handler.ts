@@ -22,6 +22,22 @@ export class ResearchHandler implements PhaseHandler {
     @Inject(PM_ADAPTER) private readonly pmAdapter: PMAdapter,
   ) {}
 
+  private getProjectContext(workflowRun: WorkflowRun): string {
+    const phaseData = workflowRun.phaseData as Record<string, any>;
+    const ctx = phaseData._projectContext;
+    if (!ctx) return '';
+    return [
+      '## Project Context',
+      `Project: ${ctx.name}`,
+      ctx.description ? `Description: ${ctx.description}` : '',
+      `Repositories: ${(ctx.repositories as any[])?.map((r: any) => `${r.url} (branch: ${r.defaultBranch || 'main'})`).join(', ') || 'None'}`,
+      '',
+      ctx.context || '',
+      '---',
+      '',
+    ].filter(Boolean).join('\n');
+  }
+
   async start(workflowRun: WorkflowRun): Promise<void> {
     this.logger.log(`Starting research phase for run ${workflowRun.id}`);
 
@@ -40,7 +56,9 @@ export class ResearchHandler implements PhaseHandler {
       phaseData.repoPath ??
       '.';
 
-    const prompt = `Research the codebase to understand how to implement the following specification.
+    const projectContext = this.getProjectContext(workflowRun);
+
+    const prompt = `${projectContext}Research the codebase to understand how to implement the following specification.
 Document what exists, how it works, where files are located, and what changes would be needed.
 Focus on file paths, code patterns, dependencies, and integration points.
 

@@ -2,7 +2,7 @@
 
 import { Header } from "@/components/layout/header";
 import { useEffect, useState, useCallback } from "react";
-import { getWorkflows, getTemplates, getAgents, Workflow, WorkflowTemplate, Agent } from "@/lib/api-client";
+import { getWorkflows, getTemplates, getAgents, getProjects, Workflow, WorkflowTemplate, Agent, Project } from "@/lib/api-client";
 import { useRealtimeEvents } from "@/hooks/use-realtime";
 
 function stateColor(state: string) {
@@ -39,16 +39,18 @@ export default function DashboardPage() {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [templates, setTemplates] = useState<WorkflowTemplate[]>([]);
   const [agentsList, setAgentsList] = useState<Agent[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const { events, connected } = useRealtimeEvents(WORKFLOW_EVENT_TYPES);
 
   const loadData = useCallback(async () => {
     try {
-      const [wfs, tpls, ags] = await Promise.all([getWorkflows(), getTemplates(), getAgents()]);
+      const [wfs, tpls, ags, projs] = await Promise.all([getWorkflows(), getTemplates(), getAgents(), getProjects()]);
       setWorkflows(wfs);
       setTemplates(tpls);
       setAgentsList(ags);
+      setProjects(projs);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load data");
     } finally {
@@ -80,6 +82,7 @@ export default function DashboardPage() {
     { label: "Active Workflows", value: loading ? "..." : String(activeWorkflows.length), change: loading ? "" : `${workflows.length} total`, color: "text-[var(--primary)]" },
     { label: "Agents Online", value: loading ? "..." : String(agentsList.filter((a) => a.status === "running").length), change: loading ? "" : `${agentsList.length} total`, color: "text-emerald-400" },
     { label: "Templates", value: loading ? "..." : String(templates.length), change: "", color: "text-sky-400" },
+    { label: "Projects", value: loading ? "..." : String(projects.length), change: loading ? "" : `${projects.filter(p => p.contextGeneratedAt).length} with context`, color: "text-violet-400" },
     { label: "Success Rate", value: loading ? "..." : total > 0 ? `${successRate}%` : "N/A", change: loading ? "" : `${total} finished`, color: "text-amber-400" },
   ];
 
@@ -111,7 +114,7 @@ export default function DashboardPage() {
         }
       />
 
-      <div className="mt-8 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="mt-8 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-5">
         {stats.map((stat) => (
           <div
             key={stat.label}
