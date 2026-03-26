@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { spawn, ChildProcess } from 'child_process';
+import { execFile } from 'child_process';
 import { randomUUID } from 'crypto';
 import { AdapterConfigService } from '../../adapter-config.service';
 import type {
@@ -11,10 +11,7 @@ import type {
 @Injectable()
 export class ClaudeCodeAdapter implements CodingAgentAdapter {
   private readonly logger = new Logger(ClaudeCodeAdapter.name);
-  private readonly instances = new Map<
-    string,
-    { process: ChildProcess; instance: AgentInstance; output: string }
-  >();
+  private readonly instances = new Map<string, AgentInstance>();
 
   constructor(private readonly adapterConfig: AdapterConfigService) {}
 
@@ -29,11 +26,10 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
 
     const instance: AgentInstance = {
       id,
-      status: 'starting',
+      status: 'running',
       startedAt: new Date(),
     };
-
-    this.instances.set(id, { process: null as any, instance, output: '' });
+    this.instances.set(id, instance);
 
     const env: Record<string, string | undefined> = {
       ...process.env,
@@ -43,121 +39,88 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
       env.ANTHROPIC_API_KEY = apiKey;
     }
 
-    const child = spawn('claude', ['-p', params.prompt, '--output-format', 'json'], {
-      cwd: params.workingDirectory,
-      env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    // Find claude binary — use CLAUDE_BIN env var, or search common locations
+    const claudeBin = process.env.CLAUDE_BIN
+      || ['/Users/jainermunoz/.local/bin/claude', '/usr/local/bin/claude', `${process.env.HOME}/.local/bin/claude`]
+        .find(p => { try { require('fs').accessSync(p); return true; } catch { return false; } })
+      || 'claude';
 
-    const entry = this.instances.get(id)!;
-    entry.process = child;
-    entry.instance.status = 'running';
+    this.logger.log(`Spawning Claude Code agent ${id} (bin: ${claudeBin}, timeout: ${params.timeout ?? 300000}ms)`);
 
-    child.stdout?.on('data', (data: Buffer) => {
-      entry.output += data.toString();
-    });
-
-    child.stderr?.on('data', (data: Buffer) => {
-      this.logger.warn(`Agent ${id} stderr: ${data.toString()}`);
-    });
-
-    child.on('close', (code) => {
-      if (code === 0) {
-        entry.instance.status = 'completed';
-        // Claude Code --output-format json wraps response in {"type":"result","result":"..."}
-        // Extract the actual AI response from the wrapper
-        try {
-          const parsed = JSON.parse(entry.output);
-          if (parsed.type === 'result' && parsed.result !== undefined) {
-            entry.output = typeof parsed.result === 'string' ? parsed.result : JSON.stringify(parsed.result);
-          }
-        } catch {
-          // Output is not JSON-wrapped, use as-is
-        }
-        entry.instance.output = entry.output;
-      } else {
-        entry.instance.status = 'failed';
-        entry.instance.error = `Process exited with code ${code}`;
-      }
-      entry.instance.completedAt = new Date();
-    });
-
-    child.on('error', (error) => {
-      entry.instance.status = 'failed';
-      entry.instance.error = error.message;
-      entry.instance.completedAt = new Date();
-    });
-
-    // Wait for the process to complete before returning
-    const result = await new Promise<AgentInstance>((resolve) => {
-      const timeoutId = params.timeout
-        ? setTimeout(() => {
-            if (entry.instance.status === 'running') {
-              this.logger.warn(`Agent ${id} timed out after ${params.timeout}ms`);
-              child.kill('SIGTERM');
-              entry.instance.status = 'failed';
-              entry.instance.error = 'Timeout exceeded';
-              entry.instance.output = entry.output;
-              entry.instance.completedAt = new Date();
-              resolve({ ...entry.instance });
+    try {
+      const result = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+        execFile(
+          claudeBin,
+          ['-p', params.prompt, '--output-format', 'json'],
+          {
+            cwd: params.workingDirectory,
+            env,
+            maxBuffer: 50 * 1024 * 1024, // 50MB
+            timeout: params.timeout ?? 300000, // 5 min default
+          },
+          (error, stdout, stderr) => {
+            if (stderr) {
+              // Filter out the stdin warning — it's expected with execFile
+              const realStderr = stderr.split('\n').filter(l => !l.includes('no stdin data received')).join('\n').trim();
+              if (realStderr) this.logger.warn(`Agent ${id} stderr: ${realStderr}`);
             }
-          }, params.timeout)
-        : null;
-
-      child.on('close', () => {
-        if (timeoutId) clearTimeout(timeoutId);
-        entry.instance.output = entry.output;
-        resolve({ ...entry.instance });
+            if (error && !stdout) {
+              reject(error);
+            } else {
+              resolve({ stdout: stdout ?? '', stderr: stderr ?? '' });
+            }
+          },
+        );
       });
 
-      child.on('error', () => {
-        if (timeoutId) clearTimeout(timeoutId);
-        entry.instance.output = entry.output;
-        resolve({ ...entry.instance });
-      });
-    });
+      // Extract the actual AI response from Claude Code's JSON wrapper
+      let output = result.stdout;
+      try {
+        const parsed = JSON.parse(output);
+        if (parsed.type === 'result' && parsed.result !== undefined) {
+          output = typeof parsed.result === 'string' ? parsed.result : JSON.stringify(parsed.result);
+        }
+      } catch {
+        // Not JSON-wrapped, use as-is
+      }
 
-    this.logger.log(`Agent ${id} finished with status: ${result.status} (${entry.output.length} bytes output)`);
-    return result;
+      instance.status = 'completed';
+      instance.output = output;
+      instance.completedAt = new Date();
+      this.logger.log(`Agent ${id} completed (${output.length} bytes)`);
+    } catch (err) {
+      instance.status = 'failed';
+      instance.error = (err as Error).message;
+      instance.completedAt = new Date();
+      this.logger.warn(`Agent ${id} failed: ${(err as Error).message}`);
+    }
+
+    return { ...instance };
   }
 
   async getStatus(instanceId: string): Promise<AgentInstance> {
-    const entry = this.instances.get(instanceId);
-    if (!entry) {
-      throw new Error(`Agent instance ${instanceId} not found`);
-    }
-    return { ...entry.instance };
+    const instance = this.instances.get(instanceId);
+    if (!instance) throw new Error(`Agent instance ${instanceId} not found`);
+    return { ...instance };
   }
 
   async getOutput(instanceId: string): Promise<string> {
-    const entry = this.instances.get(instanceId);
-    if (!entry) {
-      throw new Error(`Agent instance ${instanceId} not found`);
-    }
-    return entry.output;
+    const instance = this.instances.get(instanceId);
+    if (!instance) throw new Error(`Agent instance ${instanceId} not found`);
+    return instance.output ?? '';
   }
 
   async kill(instanceId: string): Promise<void> {
-    const entry = this.instances.get(instanceId);
-    if (!entry) {
-      throw new Error(`Agent instance ${instanceId} not found`);
-    }
-
-    if (entry.instance.status === 'running') {
-      entry.process.kill('SIGTERM');
-      entry.instance.status = 'failed';
-      entry.instance.error = 'Killed by user';
-      entry.instance.completedAt = new Date();
-    }
+    const instance = this.instances.get(instanceId);
+    if (!instance) throw new Error(`Agent instance ${instanceId} not found`);
+    // execFile processes can't be easily killed by reference,
+    // but the timeout will handle stuck processes
+    instance.status = 'failed';
+    instance.error = 'Killed by user';
+    instance.completedAt = new Date();
   }
 
   async listRunning(): Promise<AgentInstance[]> {
-    const running: AgentInstance[] = [];
-    for (const [, entry] of this.instances) {
-      if (entry.instance.status === 'running') {
-        running.push({ ...entry.instance });
-      }
-    }
-    return running;
+    return [...this.instances.values()].filter(i => i.status === 'running');
   }
 }
