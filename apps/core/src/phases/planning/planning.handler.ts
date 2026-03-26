@@ -47,15 +47,7 @@ export class PlanningHandler implements PhaseHandler {
     const research = phaseData.research?.artifacts?.research ?? '';
     const projectContext = this.getProjectContext(workflowRun);
 
-    // Post planning started comment to Jira
-    try {
-      await this.pmAdapter.addComment(
-        workflowRun.ticketId,
-        '**Planning Phase Started**\n\nGenerating implementation plan based on the specification and research...',
-      );
-    } catch (err) {
-      this.logger.warn(`Failed to post planning start comment: ${(err as Error).message}`);
-    }
+    // No "started" comment to Jira — reduces noise. Only post the actual plan.
 
     // Spawn Claude Code to generate the plan
     this.logger.log(`Spawning Claude Code for plan generation...`);
@@ -187,13 +179,14 @@ Respond with ONLY the JSON.`;
     const phaseData = workflowRun.phaseData as Record<string, any>;
     const planning = phaseData.planning ?? { tasks: [] };
 
-    // Handle approval from Jira comment
-    if (event.type === 'ticket.commented') {
+    // Handle approval from Jira comment — only if plan is awaiting approval
+    if (event.type === 'ticket.commented' && planning.status === 'awaiting_approval') {
       const rawComment = event.payload.comment;
       const commentText = typeof rawComment === 'object' && rawComment !== null
         ? (rawComment as any).body ?? ''
         : (rawComment ?? '') as string;
 
+      // Only accept approval for comments that are clearly about the plan
       if (commentText.toLowerCase().match(/\b(approve|approved|lgtm|looks good|go ahead)\b/)) {
         planning.status = 'approved';
         planning.approvedAt = new Date().toISOString();

@@ -420,33 +420,43 @@ export class PollingService implements OnModuleInit, OnModuleDestroy {
   private async checkPhaseCompletion(run: any) {
     const freshRun = await this.prisma.workflowRun.findUniqueOrThrow({ where: { id: run.id } });
     const phaseData = (freshRun.phaseData ?? {}) as Record<string, any>;
+    const completedPhases = phaseData._completedPhases ?? {};
+
+    // Helper to check if a phase was already completed (persisted in DB, survives restarts)
+    const wasAlreadyCompleted = (phase: string) => {
+      const memKey = `phase-complete:${run.id}:${phase}`;
+      return this.lastSeen.has(memKey) || completedPhases[phase];
+    };
+    const markCompleted = async (phase: string) => {
+      const memKey = `phase-complete:${run.id}:${phase}`;
+      this.lastSeen.set(memKey, 'true');
+      // Persist to DB so it survives restarts
+      const current = await this.prisma.workflowRun.findUniqueOrThrow({ where: { id: run.id } });
+      const pd = (current.phaseData ?? {}) as Record<string, any>;
+      pd._completedPhases = { ...(pd._completedPhases ?? {}), [phase]: true };
+      await this.prisma.workflowRun.update({ where: { id: run.id }, data: { phaseData: pd as any } });
+    };
 
     // Interview phase: auto-advance when spec is approved
     if (freshRun.state === 'INTERVIEWING' && phaseData.interview?.status === 'approved') {
-      const key = `phase-complete:${run.id}:interview`;
-      if (this.lastSeen.has(key)) return; // Already triggered
-      this.lastSeen.set(key, 'true');
-
+      if (wasAlreadyCompleted('interview')) return;
+      await markCompleted('interview');
       this.logger.log(`Interview approved for workflow ${run.id} — triggering phase completion`);
       await this.orchestrator.completeCurrentPhase(run.id);
     }
 
     // Research phase: auto-advance when research is completed (no human approval needed)
     if (freshRun.state === 'RESEARCHING' && phaseData.research?.status === 'completed') {
-      const key = `phase-complete:${run.id}:research`;
-      if (this.lastSeen.has(key)) return;
-      this.lastSeen.set(key, 'true');
-
+      if (wasAlreadyCompleted('research')) return;
+      await markCompleted('research');
       this.logger.log(`Research completed for workflow ${run.id} — triggering phase completion`);
       await this.orchestrator.completeCurrentPhase(run.id);
     }
 
     // Planning phase: auto-advance when plan is approved
     if (freshRun.state === 'PLANNING' && phaseData.planning?.status === 'approved') {
-      const key = `phase-complete:${run.id}:planning`;
-      if (this.lastSeen.has(key)) return;
-      this.lastSeen.set(key, 'true');
-
+      if (wasAlreadyCompleted('planning')) return;
+      await markCompleted('planning');
       this.logger.log(`Plan approved for workflow ${run.id} — triggering phase completion`);
       await this.orchestrator.completeCurrentPhase(run.id);
     }

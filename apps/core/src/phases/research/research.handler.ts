@@ -109,17 +109,8 @@ Output a structured research document with:
       },
     });
 
-    // Post a comment that research has started
-    try {
-      await this.pmAdapter.addComment(
-        ticketId,
-        `**Research Phase Started**\n\nAnalyzing the codebase based on the specification. Agent instance: \`${agentInstanceId ?? 'unavailable'}\``,
-      );
-    } catch (err) {
-      this.logger.warn(
-        `Failed to post research start comment: ${(err as Error).message}`,
-      );
-    }
+    // No Jira comment for research start — reduces noise on the ticket
+    // Research runs automatically and completes without human interaction
   }
 
   async handleEvent(
@@ -230,42 +221,15 @@ Output a structured research document with:
     research.status = 'completed';
     research.completedAt = research.completedAt ?? new Date().toISOString();
 
-    // Post a summary of research findings as a Jira comment
-    const researchOutput = research.artifacts?.research;
-    if (researchOutput) {
-      const summary =
-        researchOutput.length > 2000
-          ? researchOutput.substring(0, 2000) + '\n\n_...truncated for comment length..._'
-          : researchOutput;
-
-      try {
-        await this.pmAdapter.addComment(
-          workflowRun.ticketId,
-          `**Research Phase Complete**\n\n${summary}`,
-        );
-      } catch (err) {
-        this.logger.warn(
-          `Failed to post research summary comment: ${(err as Error).message}`,
-        );
-      }
-    } else {
-      try {
-        await this.pmAdapter.addComment(
-          workflowRun.ticketId,
-          '**Research Phase Complete**\n\nNo research artifacts were produced. The agent may have been unavailable.',
-        );
-      } catch (err) {
-        this.logger.warn(
-          `Failed to post research completion comment: ${(err as Error).message}`,
-        );
-      }
+    // Research findings stored in phaseData only — no Jira comment (reduces noise)
+    // Available via workflow detail API and UI
+    if (!research.artifacts?.research) {
+      this.logger.warn(`No research artifacts for workflow ${workflowRun.id}`);
     }
 
     await this.prisma.workflowRun.update({
       where: { id: workflowRun.id },
-      data: {
-        phaseData: { ...phaseData, research },
-      },
+      data: { phaseData: { ...phaseData, research } as any },
     });
   }
 }
