@@ -127,7 +127,9 @@ export class ReviewHandler implements PhaseHandler {
         try {
           clonedDir = await this.repoCloner.cloneRepo(taskRepoUrl);
           workingDirectory = clonedDir;
-          this.logger.log(`Cloned ${taskRepoUrl} for PR review`);
+          // Fetch the PR branch so it's available for checkout
+          await this.repoCloner.fetchBranch(clonedDir, task.branch);
+          this.logger.log(`Cloned ${taskRepoUrl} and fetched branch ${task.branch} for review`);
         } catch (err) {
           this.logger.warn(`Failed to clone for review: ${(err as Error).message}`);
         }
@@ -308,52 +310,60 @@ Post your review comments as structured JSON:
   "summary": "string"
 }`;
 
+            const allPlanTasks = ((phaseData.planning ?? {}).tasks ?? []) as any[];
+            const planTaskEntry2 = allPlanTasks.find((t: any) => t.id === task?.ticketId);
             try {
+              const taskRepoUrl2 = planTaskEntry2?.repo;
+              let reReviewDir: string | null = null;
+              let reReviewCwd = process.cwd();
+              if (taskRepoUrl2) {
+                try {
+                  reReviewDir = await this.repoCloner.cloneRepo(taskRepoUrl2);
+                  await this.repoCloner.fetchBranch(reReviewDir, task!.branch);
+                  reReviewCwd = reReviewDir;
+                } catch { /* use cwd */ }
+              }
+
               const reviewAgent = await this.codingAgent.spawn({
                 prompt: reReviewPrompt,
-                workingDirectory: '.',
+                workingDirectory: reReviewCwd,
                 timeout: 300000,
               });
 
-              const rawOutput = await this.codingAgent.getOutput(reviewAgent.id);
-              const jsonMatch = rawOutput.match(
-                /```(?:json)?\s*([\s\S]*?)```/,
-              ) ?? [null, rawOutput];
-              const reviewResult: ReviewOutput = JSON.parse(
-                jsonMatch[1]!.trim(),
-              );
+              const rawOutput = reviewAgent.output ?? '';
+              let reviewResult: ReviewOutput | null = null;
+              try {
+                const jsonMatch = rawOutput.match(/\{[\s\S]*\}/);
+                if (jsonMatch) reviewResult = JSON.parse(jsonMatch[0]);
+              } catch { /* not JSON */ }
 
-              // Post new inline comments
-              for (const comment of reviewResult.comments) {
-                try {
-                  await this.codeHost.addReviewComment(repo, pr.prNumber, {
-                    body: comment.body,
-                    path: comment.file,
-                    line: comment.line,
-                  });
-                } catch (err) {
-                  this.logger.warn(
-                    `Failed to post re-review inline comment: ${(err as Error).message}`,
-                  );
+              const repoSlug2 = taskRepoUrl2 ? this.extractSlug(taskRepoUrl2) : repo;
+
+              if (reviewResult?.comments?.length) {
+                for (const comment of reviewResult.comments) {
+                  try {
+                    await this.codeHost.addReviewComment(repoSlug2, pr.prNumber, {
+                      body: comment.body, path: comment.file, line: comment.line,
+                    });
+                  } catch (err) {
+                    this.logger.warn(`Failed to post re-review inline comment: ${(err as Error).message}`);
+                  }
                 }
               }
 
+              const summary2 = reviewResult?.summary ?? rawOutput.substring(0, 1000);
               try {
-                await this.codeHost.addPRComment(
-                  repo,
-                  pr.prNumber,
-                  `## Orchestra Re-Review\n\n**Verdict:** ${reviewResult.approved ? 'Approved' : 'Changes Requested'}\n\n${reviewResult.summary}`,
+                await this.codeHost.addPRComment(repoSlug2, pr.prNumber,
+                  `## Orchestra Re-Review\n\n${summary2}\n\n${reviewResult?.approved ? '✅ **Approved**' : '⚠️ **Changes requested**'}`,
                 );
               } catch (err) {
-                this.logger.warn(
-                  `Failed to post re-review summary: ${(err as Error).message}`,
-                );
+                this.logger.warn(`Failed to post re-review summary: ${(err as Error).message}`);
               }
 
-              pr.reviewStatus = reviewResult.approved
-                ? 'approved'
-                : 'changes_requested';
-              pr.reviewComments = reviewResult.comments;
+              pr.reviewStatus = reviewResult?.approved ? 'approved' : 'changes_requested';
+              pr.reviewComments = reviewResult?.comments ?? [];
+
+              if (reReviewDir) this.repoCloner.cleanupClone(reReviewDir);
             } catch (reReviewErr) {
               this.logger.warn(
                 `Failed to spawn re-review agent: ${(reReviewErr as Error).message}`,

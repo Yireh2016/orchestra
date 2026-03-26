@@ -110,6 +110,19 @@ export class RepoClonerService {
     return { url: primary.url, branch: primary.defaultBranch || 'main' };
   }
 
+  /**
+   * Fetch a specific remote branch into a cloned repo and check it out.
+   */
+  async fetchBranch(repoDir: string, branch: string): Promise<void> {
+    try {
+      await this.exec('git', ['fetch', 'origin', branch], repoDir);
+      await this.exec('git', ['checkout', branch], repoDir);
+      this.logger.log(`Checked out branch ${branch} in ${repoDir}`);
+    } catch (err) {
+      this.logger.warn(`Failed to fetch/checkout branch ${branch}: ${(err as Error).message}`);
+    }
+  }
+
   cleanupClone(tmpDir: string): void {
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -127,9 +140,9 @@ export class RepoClonerService {
     return match ? match[1] : url.replace(/[^a-zA-Z0-9-]/g, '_');
   }
 
-  private async exec(command: string, args: string[]): Promise<void> {
+  private async exec(command: string, args: string[], cwd?: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      execFile(command, args, { maxBuffer: 50 * 1024 * 1024, timeout: 180000 }, (error) => {
+      execFile(command, args, { cwd, maxBuffer: 50 * 1024 * 1024, timeout: 180000 }, (error) => {
         if (error) reject(error);
         else resolve();
       });
