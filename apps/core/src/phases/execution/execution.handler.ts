@@ -75,10 +75,34 @@ export class ExecutionHandler implements PhaseHandler {
       this.logger.warn(`No repository configured for workflow ${workflowRun.id}. Create a Project with a repository URL.`);
     }
 
-    // Load all tasks for this workflow run
-    const tasks = await this.prisma.task.findMany({
+    // Load all tasks for this workflow run — create from plan if missing
+    let tasks = await this.prisma.task.findMany({
       where: { workflowRunId: workflowRun.id },
     });
+
+    // If no tasks in DB but plan has tasks in phaseData, create them (rerun scenario)
+    if (tasks.length === 0) {
+      const planTasks = (phaseData.planning?.tasks ?? []) as any[];
+      if (planTasks.length > 0) {
+        this.logger.log(`No tasks in DB — creating ${planTasks.length} tasks from plan`);
+        for (const pt of planTasks) {
+          await this.prisma.task.create({
+            data: {
+              workflowRunId: workflowRun.id,
+              ticketId: pt.id ?? pt.title,
+              branch: `orchestra/${workflowRun.ticketId}/${pt.branch ?? pt.id}`,
+              dependsOn: pt.dependsOn ?? [],
+              status: 'PENDING',
+              gateResults: pt.gates ?? {},
+            },
+          });
+        }
+        tasks = await this.prisma.task.findMany({
+          where: { workflowRunId: workflowRun.id },
+        });
+        this.logger.log(`Created ${tasks.length} tasks in DB`);
+      }
+    }
 
     // Find tasks that are ready to execute:
     // - PENDING with no deps (root tasks), OR
