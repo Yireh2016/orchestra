@@ -64,6 +64,16 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
     child.on('close', (code) => {
       if (code === 0) {
         entry.instance.status = 'completed';
+        // Claude Code --output-format json wraps response in {"type":"result","result":"..."}
+        // Extract the actual AI response from the wrapper
+        try {
+          const parsed = JSON.parse(entry.output);
+          if (parsed.type === 'result' && parsed.result !== undefined) {
+            entry.output = typeof parsed.result === 'string' ? parsed.result : JSON.stringify(parsed.result);
+          }
+        } catch {
+          // Output is not JSON-wrapped, use as-is
+        }
         entry.instance.output = entry.output;
       } else {
         entry.instance.status = 'failed';

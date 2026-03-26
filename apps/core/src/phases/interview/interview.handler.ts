@@ -379,9 +379,15 @@ Respond with ONLY the JSON.`;
       });
 
       const output = agent.output ?? '';
+      this.logger.log(`AI evaluation output (${output.length} chars): ${output.substring(0, 200)}...`);
+
       const jsonMatch = output.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        this.logger.warn(`No JSON found in AI output, falling back. Raw: ${output.substring(0, 300)}`);
+      }
       if (jsonMatch) {
         const result = JSON.parse(jsonMatch[0]);
+        this.logger.log(`AI evaluation result: ready=${result.ready}, hasSpec=${!!result.spec}, questions=${result.questions?.length ?? 0}`);
 
         if (result.ready && result.spec) {
           interview.spec = result.spec;
@@ -429,10 +435,9 @@ Respond with ONLY the JSON.`;
       this.logger.warn(`AI evaluation failed: ${(err as Error).message}`);
     }
 
-    // If AI fails or we've been going back and forth, just synthesize
-    if ((interview.responses?.length ?? 0) >= 3) {
-      await this.synthesizeAndPostSpec(workflowRun, interview, phaseData);
-    }
+    // Fallback: if AI didn't produce a result, synthesize from what we have
+    this.logger.log(`AI didn't produce actionable result — synthesizing spec from ${interview.responses?.length ?? 0} responses`);
+    await this.synthesizeAndPostSpec(workflowRun, interview, phaseData);
   }
 
   // ---------------------------------------------------------------------------
