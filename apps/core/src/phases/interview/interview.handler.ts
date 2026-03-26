@@ -181,15 +181,25 @@ export class InterviewHandler implements PhaseHandler {
           );
         }
       } else {
-        // Analyze whether more questions are needed or spec is complete
+        // Track conversation rounds to know when to stop
+        interview.round = (interview.round ?? 0) + 1;
+        const MAX_ROUNDS = 3; // After 3 rounds of Q&A, synthesize spec
+
         const allResponses = interview.responses as Array<{
           author: string;
           content: string;
         }>;
-        const totalQuestions = (interview.questions ?? []).length;
 
-        if (allResponses.length >= totalQuestions) {
-          // Enough responses gathered; synthesize spec
+        // Check if user replied "approve" to a draft spec
+        if (interview.status === 'spec_ready' && commentText.toLowerCase().includes('approve')) {
+          interview.status = 'approved';
+          this.logger.log(`Spec approved for workflow ${workflowRun.id}`);
+        }
+        // If we've had enough rounds OR user says "done"/"ready"/"that's all", synthesize
+        else if (
+          interview.round >= MAX_ROUNDS ||
+          commentText.toLowerCase().match(/\b(done|ready|that'?s all|no more|proceed|looks good|go ahead)\b/)
+        ) {
           interview.spec = this.synthesizeSpec(
             interview.questions ?? [],
             allResponses,
@@ -201,7 +211,7 @@ export class InterviewHandler implements PhaseHandler {
             '',
             interview.spec,
             '',
-            '_Please review and reply with "approve" to proceed, or provide additional feedback._',
+            '_Please review and reply with **"approve"** to proceed to the next phase, or provide additional feedback._',
           ].join('\n');
 
           try {
@@ -211,8 +221,9 @@ export class InterviewHandler implements PhaseHandler {
               `Failed to post draft spec: ${(err as Error).message}`,
             );
           }
-        } else {
-          // Generate follow-up questions based on responses so far
+        }
+        // Otherwise, generate follow-up questions only if we haven't already posted follow-ups this round
+        else if (!interview.followUpPostedForRound || interview.followUpPostedForRound < interview.round) {
           const followUps = this.generateFollowUpQuestions(
             interview.questions ?? [],
             allResponses,
@@ -223,11 +234,14 @@ export class InterviewHandler implements PhaseHandler {
               ...(interview.questions ?? []),
               ...followUps,
             ];
+            interview.followUpPostedForRound = interview.round;
 
             const followUpMessage = [
-              '**Follow-up Questions**',
+              '**Follow-up Questions** (Round ' + interview.round + '/' + MAX_ROUNDS + ')',
               '',
               ...followUps.map((q, i) => `${i + 1}. ${q}`),
+              '',
+              '_Reply with your answers, or say **"done"** if you have nothing more to add._',
             ].join('\n');
 
             try {
@@ -240,16 +254,54 @@ export class InterviewHandler implements PhaseHandler {
                 `Failed to post follow-up questions: ${(err as Error).message}`,
               );
             }
+          } else {
+            // No more follow-ups to ask — go straight to spec synthesis
+            interview.spec = this.synthesizeSpec(
+              interview.questions ?? [],
+              allResponses,
+            );
+            interview.status = 'spec_ready';
+
+            const specMessage = [
+              '**Draft Specification**',
+              '',
+              interview.spec,
+              '',
+              '_Please review and reply with **"approve"** to proceed to the next phase, or provide additional feedback._',
+            ].join('\n');
+
+            try {
+              await this.pmAdapter.addComment(workflowRun.ticketId, specMessage);
+            } catch (err) {
+              this.logger.warn(
+                `Failed to post draft spec: ${(err as Error).message}`,
+              );
+            }
           }
+        } else {
+          this.logger.log(`Skipping follow-up — already posted for round ${interview.round}`);
         }
       }
 
       await this.prisma.workflowRun.update({
         where: { id: workflowRun.id },
         data: {
-          phaseData: { ...phaseData, interview },
+          phaseData: { ...phaseData, interview } as any,
         },
       });
+
+      // If spec was just approved, signal to orchestrator to move on
+      if (interview.status === 'approved') {
+        this.logger.log(`Interview approved for workflow ${workflowRun.id} — ready to advance`);
+        try {
+          await this.pmAdapter.addComment(
+            workflowRun.ticketId,
+            '**Interview Complete** — Specification approved. Moving to the Research phase.',
+          );
+        } catch (err) {
+          this.logger.warn(`Failed to post approval confirmation: ${(err as Error).message}`);
+        }
+      }
     }
   }
 

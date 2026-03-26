@@ -139,6 +139,15 @@ export class PollingService implements OnModuleInit, OnModuleDestroy {
             `Failed to poll Jira for ${run.ticketId}: ${(err as Error).message}`,
           );
         }
+
+        // Check if phase is ready to advance (e.g., interview approved)
+        try {
+          await this.checkPhaseCompletion(run);
+        } catch (err) {
+          this.logger.warn(
+            `Failed phase completion check for ${run.id}: ${(err as Error).message}`,
+          );
+        }
       }
 
       this.lastPollAt = new Date();
@@ -150,7 +159,11 @@ export class PollingService implements OnModuleInit, OnModuleDestroy {
   private async checkJiraComments(run: any) {
     const ticketId = run.ticketId;
     const key = `jira:comments:${ticketId}`;
-    const lastSeenId = this.lastSeen.get(key);
+
+    // Read lastSeen from DB (phaseData._polling) for crash resilience
+    const phaseData = (run.phaseData ?? {}) as Record<string, any>;
+    const pollingState = phaseData._polling ?? {};
+    const lastSeenId = this.lastSeen.get(key) ?? pollingState[key] ?? null;
 
     // Fetch comments from Jira
     const comments = await this.pm.getComments(ticketId);
@@ -171,8 +184,17 @@ export class PollingService implements OnModuleInit, OnModuleDestroy {
 
     if (!newComments.length) return;
 
-    // Update last seen
-    this.lastSeen.set(key, newComments[newComments.length - 1].id);
+    // Update last seen — both in-memory and in DB for crash resilience
+    const latestId = newComments[newComments.length - 1].id;
+    this.lastSeen.set(key, latestId);
+    try {
+      const freshRun = await this.prisma.workflowRun.findUniqueOrThrow({ where: { id: run.id } });
+      const freshPhaseData = (freshRun.phaseData ?? {}) as Record<string, any>;
+      freshPhaseData._polling = { ...(freshPhaseData._polling ?? {}), [key]: latestId };
+      await this.prisma.workflowRun.update({ where: { id: run.id }, data: { phaseData: freshPhaseData as any } });
+    } catch (err) {
+      this.logger.warn(`Failed to persist polling state for ${ticketId}: ${(err as Error).message}`);
+    }
 
     // Route each new comment as an event
     for (const comment of newComments) {
@@ -365,12 +387,52 @@ export class PollingService implements OnModuleInit, OnModuleDestroy {
    *   "Review phase completed."
    * - HTML marker: "<!-- orchestra-bot -->"
    */
+  /**
+   * Check if a workflow's current phase is ready to advance.
+   * Called after processing comments to detect approval signals.
+   */
+  private async checkPhaseCompletion(run: any) {
+    const freshRun = await this.prisma.workflowRun.findUniqueOrThrow({ where: { id: run.id } });
+    const phaseData = (freshRun.phaseData ?? {}) as Record<string, any>;
+
+    // Interview phase: auto-advance when spec is approved
+    if (freshRun.state === 'INTERVIEWING' && phaseData.interview?.status === 'approved') {
+      const key = `phase-complete:${run.id}:interview`;
+      if (this.lastSeen.has(key)) return; // Already triggered
+      this.lastSeen.set(key, 'true');
+
+      this.logger.log(`Interview approved for workflow ${run.id} — triggering phase completion`);
+      await this.orchestrator.completeCurrentPhase(run.id);
+    }
+
+    // Planning phase: auto-advance when plan is approved
+    if (freshRun.state === 'PLANNING' && phaseData.planning?.status === 'approved') {
+      const key = `phase-complete:${run.id}:planning`;
+      if (this.lastSeen.has(key)) return;
+      this.lastSeen.set(key, 'true');
+
+      this.logger.log(`Plan approved for workflow ${run.id} — triggering phase completion`);
+      await this.orchestrator.completeCurrentPhase(run.id);
+    }
+
+    // Review phase: auto-advance when all PRs are merged
+    if (freshRun.state === 'REVIEWING' && phaseData.review?.status === 'completed') {
+      const key = `phase-complete:${run.id}:review`;
+      if (this.lastSeen.has(key)) return;
+      this.lastSeen.set(key, 'true');
+
+      this.logger.log(`All PRs merged for workflow ${run.id} — triggering phase completion`);
+      await this.orchestrator.completeCurrentPhase(run.id);
+    }
+  }
+
   private isOrchestraComment(body: string): boolean {
     const orchestraPrefixes = [
       '**Requirements Interview**',
       '**Conflict Detected**',
       '**Follow-up Questions**',
       '**Draft Specification**',
+      '**Interview Complete**',
       '**Interview Complete - Final Specification**',
       '**Research Phase Started**',
       '**Research Phase Complete**',
