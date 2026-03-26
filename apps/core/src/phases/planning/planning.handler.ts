@@ -169,7 +169,14 @@ Respond with ONLY the JSON.`;
       ].join('\n');
 
       try {
-        await this.pmAdapter.addComment(workflowRun.ticketId, planSummary);
+        const planComment = await this.pmAdapter.addComment(workflowRun.ticketId, planSummary);
+        // Save the plan comment ID — only accept approval comments posted AFTER this one
+        const freshRun = await this.prisma.workflowRun.findUniqueOrThrow({ where: { id: workflowRun.id } });
+        const freshPd = (freshRun.phaseData ?? {}) as Record<string, any>;
+        if (freshPd.planning) {
+          freshPd.planning.planCommentId = planComment.id;
+          await this.prisma.workflowRun.update({ where: { id: workflowRun.id }, data: { phaseData: freshPd as any } });
+        }
       } catch (err) {
         this.logger.warn(`Failed to post plan: ${(err as Error).message}`);
       }
@@ -201,14 +208,14 @@ Respond with ONLY the JSON.`;
         ? (rawComment as any).body ?? ''
         : (rawComment ?? '') as string;
 
-      // Only accept comments posted AFTER the plan was generated (ignore old "approve" comments)
-      const commentCreatedAt = typeof rawComment === 'object' && rawComment !== null
-        ? new Date((rawComment as any).createdAt ?? 0)
-        : new Date(0);
-      const planPostedAt = planning.planPostedAt ? new Date(planning.planPostedAt) : new Date(0);
+      // Only accept comments posted AFTER the plan comment (by Jira comment ID)
+      const commentId = typeof rawComment === 'object' && rawComment !== null
+        ? (rawComment as any).id ?? ''
+        : '';
+      const planCommentId = planning.planCommentId ?? '';
 
-      if (commentCreatedAt < planPostedAt) {
-        this.logger.log(`Ignoring old comment (${commentCreatedAt.toISOString()}) — plan was posted at ${planPostedAt.toISOString()}`);
+      if (planCommentId && commentId && parseInt(commentId, 10) <= parseInt(planCommentId, 10)) {
+        this.logger.log(`Ignoring comment ${commentId} — posted before/same as plan comment ${planCommentId}`);
         return;
       }
 

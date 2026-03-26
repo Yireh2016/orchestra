@@ -74,11 +74,14 @@ export class InterviewHandler implements PhaseHandler {
       ].join('\n');
 
       try {
-        await this.pmAdapter.addComment(ticketId, specMessage);
+        const specComment = await this.pmAdapter.addComment(ticketId, specMessage);
+        // Store the spec comment ID for approval guard
+        (workflowRun.phaseData as any)._specCommentId = specComment.id;
       } catch (err) {
         this.logger.warn(`Failed to post spec: ${(err as Error).message}`);
       }
 
+      const specCommentId = (workflowRun.phaseData as any)?._specCommentId ?? '';
       await this.prisma.workflowRun.update({
         where: { id: workflowRun.id },
         data: {
@@ -87,6 +90,7 @@ export class InterviewHandler implements PhaseHandler {
             interview: {
               status: 'spec_ready',
               ticketId,
+              specCommentId,
               questions: [],
               responses: existingComments.map(c => ({ author: c.author, content: c.body, timestamp: new Date() })),
               spec,
@@ -165,13 +169,15 @@ export class InterviewHandler implements PhaseHandler {
       interview.responses = interview.responses ?? [];
       interview.responses.push({ author, content: commentText, timestamp: new Date().toISOString() });
 
-      // Check for approval keywords — only accept comments after the spec was posted
+      // Check for approval keywords — only accept comments posted AFTER the spec comment
       const lower = commentText.toLowerCase().trim();
-      const commentCreatedAt = typeof rawComment === 'object' && rawComment !== null
-        ? new Date((rawComment as any).createdAt ?? 0) : new Date(0);
-      const specPostedAt = interview.specPostedAt ? new Date(interview.specPostedAt) : new Date(0);
+      const commentId = typeof rawComment === 'object' && rawComment !== null
+        ? (rawComment as any).id ?? '' : '';
+      const specCommentId = interview.specCommentId ?? '';
 
-      if (interview.status === 'spec_ready' && lower.match(/\b(approve|approved|lgtm|looks good)\b/) && commentCreatedAt > specPostedAt) {
+      const isAfterSpec = !specCommentId || (commentId && parseInt(commentId, 10) > parseInt(specCommentId, 10));
+
+      if (interview.status === 'spec_ready' && lower.match(/\b(approve|approved|lgtm|looks good)\b/) && isAfterSpec) {
         await this.markApproved(workflowRun, author);
         return;
       }
@@ -426,13 +432,14 @@ Respond with ONLY the JSON.`;
           interview.specPostedAt = new Date().toISOString();
 
           try {
-            await this.pmAdapter.addComment(workflowRun.ticketId, [
+            const specComment = await this.pmAdapter.addComment(workflowRun.ticketId, [
               '**Draft Specification**',
               '',
               result.spec,
               '',
               '_Please review and reply with **"approve"** to proceed, or provide feedback._',
             ].join('\n'));
+            interview.specCommentId = specComment.id;
           } catch (err) {
             this.logger.warn(`Failed to post spec: ${(err as Error).message}`);
           }
@@ -532,13 +539,14 @@ Respond with ONLY the JSON.`;
     interview.specPostedAt = new Date().toISOString();
 
     try {
-      await this.pmAdapter.addComment(workflowRun.ticketId, [
+      const specComment = await this.pmAdapter.addComment(workflowRun.ticketId, [
         '**Draft Specification**',
         '',
         spec,
         '',
         '_Please review and reply with **"approve"** to proceed, or provide feedback._',
       ].join('\n'));
+      interview.specCommentId = specComment.id;
     } catch (err) {
       this.logger.warn(`Failed to post spec: ${(err as Error).message}`);
     }
