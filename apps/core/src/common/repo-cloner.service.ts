@@ -115,7 +115,7 @@ export class RepoClonerService {
    */
   async fetchBranch(repoDir: string, branch: string): Promise<void> {
     try {
-      await this.exec('git', ['fetch', 'origin', branch], repoDir);
+      await this.exec('git', ['fetch', 'origin', `${branch}:${branch}`], repoDir);
       await this.exec('git', ['checkout', branch], repoDir);
       this.logger.log(`Checked out branch ${branch} in ${repoDir}`);
     } catch (err) {
