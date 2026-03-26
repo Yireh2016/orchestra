@@ -1,40 +1,35 @@
 ---
 name: Orchestra — Agentic Coding Workflow Platform
-description: Building a tool-agnostic agentic workflow platform (Orchestra) — NestJS + Next.js + PostgreSQL + K8s, with customizable workflow templates and plugin adapters
+description: Tool-agnostic agentic workflow platform — all 7 phases complete, production-ready
 type: project
 ---
 
-## Project: Orchestra
+## Project: Orchestra — COMPLETE
 
-Platform that turns PM tickets into working PRs via AI coding agents.
+Platform that turns PM tickets into working PRs via AI coding agents. All 7 implementation phases are done.
 
 ### Completed Phases
-- **Phase 1 (2026-03-25):** Monorepo scaffold — 110 files, all packages compile, Docker/K8s ready
-- **Phase 2 (2026-03-25):** Core engine — WorkflowOrchestratorService (central brain), fault-tolerant phase handlers, live frontend wired to API, pause/resume, health endpoint
+1. **Phase 1:** Monorepo scaffold (Turborepo, NestJS, Next.js, Prisma, Docker, K8s)
+2. **Phase 2:** Core engine (WorkflowOrchestratorService, state machine, templates)
+3. **Phase 3:** Integration management (encrypted secrets, test connection, Google OAuth)
+4. **Phase 4:** Live phase handlers (all 5 phases with real Jira/GitHub/Claude Code adapters)
+5. **Phase 5:** Agent runtime (process/docker/k8s modes, task queue, monitoring)
+6. **Phase 6:** Real-time WebSocket events, polished UI, audit log
+7. **Phase 7:** 83 tests, production hardening, K8s finalization, documentation
 
-### Tech Stack
-- **Backend:** NestJS (TypeScript), Prisma + PostgreSQL, BullMQ + Redis
-- **Frontend:** Next.js 15, Tailwind CSS v4, dark theme
-- **Infra:** Docker Compose (dev), K8s manifests (prod)
-- **Monorepo:** Turborepo + pnpm workspaces
+### Stats
+- ~190 files, ~30,000 lines of code
+- 83 unit tests passing
+- 7 branches merged to master
 
-### Key Decisions
-- Name: Orchestra
-- Trigger: Label/tag v1, bot user future must-have
-- Branching: `orchestra/<ticket-id>/<task-slug>`
-- Approval UX: In the PR
-- Auth: Google OAuth + SSO (SAML/OIDC)
-- Workflow Templates: Customizable, clonable, publishable
-- Dev ports: Postgres 5433, Redis 6379, Core 3001, Web 3000
-
-### Next Phases
-- Phase 3: First adapters (Jira, GitHub, Slack, Claude Code) — make them actually work with real APIs
-- Phase 4: Phase handlers end-to-end with real adapter calls
-- Phase 5: Agent runtime — K8s Jobs, parallel execution
-- Phase 6: UI polish
-- Phase 7: E2E testing, production readiness
-
-### Source Files
+### Key Files
 - Product spec: `docs/product-spec.md`
 - Tech stack: `docs/tech-stack.md`
-- Original workflow ref: `/Users/jainermunoz/Documents/roadmunk/.claude/commands/ai-driven-development/`
+- API reference: `docs/api-reference.md`
+- Deployment guide: `docs/deployment-guide.md`
+- README: `README.md`
+
+### Pending Items
+- Slack integration (needs org admin approval)
+- Bot user account trigger (future, pending org policy)
+- Cost controls (future)
