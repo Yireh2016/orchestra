@@ -95,18 +95,17 @@ Respond with ONLY a JSON object in this exact format:
 
 Respond with ONLY the JSON.`;
 
-    // Clone the target repo so Claude Code analyzes the right codebase
+    // Clone ALL project repos so Claude Code has the full picture
     let clonedDir: string | null = null;
     let workingDirectory = process.cwd();
-    const repoInfo = this.repoCloner.getPrimaryRepoUrl(phaseData);
-    if (repoInfo) {
-      try {
-        clonedDir = await this.repoCloner.cloneRepo(repoInfo.url, repoInfo.branch);
+    try {
+      clonedDir = await this.repoCloner.cloneAllRepos(phaseData);
+      if (clonedDir) {
         workingDirectory = clonedDir;
-        this.logger.log(`Planning will analyze cloned repo at ${clonedDir}`);
-      } catch (err) {
-        this.logger.warn(`Failed to clone repo for planning: ${(err as Error).message}`);
+        this.logger.log(`Planning will analyze all repos in workspace ${clonedDir}`);
       }
+    } catch (err) {
+      this.logger.warn(`Failed to clone repos for planning: ${(err as Error).message}`);
     }
 
     let plan: { overview: string; tasks: any[] } | null = null;

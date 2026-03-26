@@ -52,18 +52,17 @@ export class ResearchHandler implements PhaseHandler {
       phaseData.interview ??
       'No specification available.';
 
-    // Clone the target repo so Claude Code analyzes the right codebase
+    // Clone ALL project repos so Claude Code has the full picture
     let workingDirectory = process.cwd();
     let clonedDir: string | null = null;
-    const repoInfo = this.repoCloner.getPrimaryRepoUrl(phaseData);
-    if (repoInfo) {
-      try {
-        clonedDir = await this.repoCloner.cloneRepo(repoInfo.url, repoInfo.branch);
+    try {
+      clonedDir = await this.repoCloner.cloneAllRepos(phaseData);
+      if (clonedDir) {
         workingDirectory = clonedDir;
-        this.logger.log(`Research will analyze cloned repo at ${clonedDir}`);
-      } catch (err) {
-        this.logger.warn(`Failed to clone repo for research: ${(err as Error).message} — falling back to local dir`);
+        this.logger.log(`Research will analyze all repos in workspace ${clonedDir}`);
       }
+    } catch (err) {
+      this.logger.warn(`Failed to clone repos for research: ${(err as Error).message} — falling back to local dir`);
     }
 
     const projectContext = this.getProjectContext(workflowRun);
