@@ -78,19 +78,37 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
       entry.instance.completedAt = new Date();
     });
 
-    if (params.timeout) {
-      setTimeout(() => {
-        if (entry.instance.status === 'running') {
-          this.logger.warn(`Agent ${id} timed out after ${params.timeout}ms`);
-          child.kill('SIGTERM');
-          entry.instance.status = 'failed';
-          entry.instance.error = 'Timeout exceeded';
-          entry.instance.completedAt = new Date();
-        }
-      }, params.timeout);
-    }
+    // Wait for the process to complete before returning
+    const result = await new Promise<AgentInstance>((resolve) => {
+      const timeoutId = params.timeout
+        ? setTimeout(() => {
+            if (entry.instance.status === 'running') {
+              this.logger.warn(`Agent ${id} timed out after ${params.timeout}ms`);
+              child.kill('SIGTERM');
+              entry.instance.status = 'failed';
+              entry.instance.error = 'Timeout exceeded';
+              entry.instance.output = entry.output;
+              entry.instance.completedAt = new Date();
+              resolve({ ...entry.instance });
+            }
+          }, params.timeout)
+        : null;
 
-    return { ...instance, status: 'running' };
+      child.on('close', () => {
+        if (timeoutId) clearTimeout(timeoutId);
+        entry.instance.output = entry.output;
+        resolve({ ...entry.instance });
+      });
+
+      child.on('error', () => {
+        if (timeoutId) clearTimeout(timeoutId);
+        entry.instance.output = entry.output;
+        resolve({ ...entry.instance });
+      });
+    });
+
+    this.logger.log(`Agent ${id} finished with status: ${result.status} (${entry.output.length} bytes output)`);
+    return result;
   }
 
   async getStatus(instanceId: string): Promise<AgentInstance> {
