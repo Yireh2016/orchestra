@@ -44,11 +44,10 @@ export class WorkflowController {
     @Body() body: { templateId: string; ticketId: string; projectId?: string },
   ) {
     const run = await this.workflowService.create(body);
-    try {
-      await this.orchestrator.startWorkflow(run.id);
-    } catch (err) {
+    // Fire and forget — orchestration involves cloning repos and AI calls
+    this.orchestrator.startWorkflow(run.id).catch((err) => {
       this.logger.warn(`Failed to start workflow orchestration for run ${run.id}: ${(err as Error).message}`);
-    }
+    });
     return run;
   }
 
@@ -77,7 +76,11 @@ export class WorkflowController {
 
   @Post(':id/rerun')
   async rerun(@Param('id') id: string) {
-    await this.orchestrator.rerunWorkflow(id);
+    // Fire and forget — rerun involves cloning repos and spawning AI agents
+    // which takes much longer than the HTTP timeout
+    this.orchestrator.rerunWorkflow(id).catch((err) => {
+      this.logger.error(`Rerun failed for ${id}: ${(err as Error).message}`);
+    });
     return { status: 'rerunning', workflowRunId: id };
   }
 }
