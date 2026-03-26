@@ -398,10 +398,14 @@ export class ExecutionHandler implements PhaseHandler {
 
   private async checkDependenciesMet(dependsOn: string[]): Promise<boolean> {
     for (const depId of dependsOn) {
-      const dep = await this.prisma.task.findUnique({
-        where: { id: depId },
+      // dependsOn contains ticketId values (e.g., "task-1"), not UUIDs
+      const dep = await this.prisma.task.findFirst({
+        where: { ticketId: depId },
       });
-      if (!dep || dep.status !== 'PASSED') return false;
+      if (!dep || dep.status !== 'PASSED') {
+        this.logger.debug(`Dependency ${depId}: ${dep ? `status=${dep.status}` : 'not found'}`);
+        return false;
+      }
     }
     return true;
   }
