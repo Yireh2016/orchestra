@@ -12,6 +12,7 @@ import { CODE_HOST_ADAPTER } from '../../adapters/interfaces/code-host-adapter.i
 import type { CodeHostAdapter } from '../../adapters/interfaces/code-host-adapter.interface';
 import { PM_ADAPTER } from '../../adapters/interfaces/pm-adapter.interface';
 import type { PMAdapter } from '../../adapters/interfaces/pm-adapter.interface';
+import { RepoClonerService } from '../../common/repo-cloner.service';
 
 interface ReviewOutput {
   approved: boolean;
@@ -37,7 +38,13 @@ export class ReviewHandler implements PhaseHandler {
     @Inject(CODING_AGENT_ADAPTER) private readonly codingAgent: CodingAgentAdapter,
     @Inject(CODE_HOST_ADAPTER) private readonly codeHost: CodeHostAdapter,
     @Inject(PM_ADAPTER) private readonly pm: PMAdapter,
+    private readonly repoCloner: RepoClonerService,
   ) {}
+
+  private extractSlug(url: string): string {
+    const match = url.match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
+    return match ? match[1] : url;
+  }
 
   private getProjectContext(workflowRun: WorkflowRun): string {
     const phaseData = workflowRun.phaseData as Record<string, any>;
@@ -108,81 +115,99 @@ export class ReviewHandler implements PhaseHandler {
       };
       reviewData.prs.push(prState);
 
-      // Spawn reviewer coding agent
+      // Clone the repo so Claude Code can see the actual code and diff
       const projectContext = this.getProjectContext(workflowRun);
-      const reviewPrompt = `${projectContext}Review this pull request. Check for:
-- Code correctness and potential bugs
-- Adherence to the specification
-- Code style and best practices
-- Missing tests or edge cases
+      let workingDirectory = process.cwd();
+      let clonedDir: string | null = null;
 
-PR URL: ${task.prUrl}
-Task description: ${planTask?.description ?? task.ticketId}
+      // Resolve the repo for this task
+      const planTaskEntry = (planning.tasks ?? []).find((t: any) => t.id === task.ticketId);
+      const taskRepoUrl = planTaskEntry?.repo;
+      if (taskRepoUrl) {
+        try {
+          clonedDir = await this.repoCloner.cloneRepo(taskRepoUrl);
+          workingDirectory = clonedDir;
+          this.logger.log(`Cloned ${taskRepoUrl} for PR review`);
+        } catch (err) {
+          this.logger.warn(`Failed to clone for review: ${(err as Error).message}`);
+        }
+      }
+
+      const reviewPrompt = `${projectContext}You are reviewing a pull request. The repository is cloned in your working directory.
+
+The PR branch is: ${task.branch}
+Task: ${planTask?.description ?? task.ticketId}
 Acceptance criteria: ${planTask?.acceptanceCriteria?.join(', ') ?? 'N/A'}
 
-Post your review comments as structured JSON:
-{
-  "approved": boolean,
-  "comments": [{ "file": "path", "line": number, "body": "comment" }],
-  "summary": "string"
-}`;
+Instructions:
+1. Check out the PR branch: git checkout ${task.branch}
+2. Look at the changes: git diff ${task.branch.includes('main') ? 'main' : 'HEAD~1'}..HEAD
+3. Review the code for correctness, bugs, style, and missing tests
+4. Provide your review
+
+Respond with ONLY a JSON object:
+{"approved": true/false, "summary": "Overall assessment", "comments": [{"file": "path/to/file", "line": 1, "body": "Comment text"}]}
+
+If you cannot check out the branch or see the diff, still provide a review based on the task description and any files you can see. Respond with ONLY JSON.`;
 
       try {
         const agentInstance = await this.codingAgent.spawn({
           prompt: reviewPrompt,
-          workingDirectory: '.',
+          workingDirectory,
           timeout: 300000,
         });
 
-        const rawOutput = await this.codingAgent.getOutput(agentInstance.id);
+        const rawOutput = agentInstance.output ?? '';
+        this.logger.log(`Review agent output for PR #${prNumber}: ${rawOutput.length} bytes`);
 
-        // Parse review output
-        const jsonMatch = rawOutput.match(/```(?:json)?\s*([\s\S]*?)```/) ?? [
-          null,
-          rawOutput,
-        ];
-        const review: ReviewOutput = JSON.parse(jsonMatch[1]!.trim());
+        // Try to parse JSON from the output
+        let review: ReviewOutput | null = null;
+        try {
+          const jsonMatch = rawOutput.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            review = JSON.parse(jsonMatch[0]);
+          }
+        } catch {
+          this.logger.warn(`Could not parse review JSON for PR #${prNumber} — using text as summary`);
+        }
 
-        // Post inline comments via CodeHostAdapter
-        for (const comment of review.comments) {
-          try {
-            await this.codeHost.addReviewComment(repo, prNumber, {
-              body: comment.body,
-              path: comment.file,
-              line: comment.line,
-            });
-          } catch (err) {
-            this.logger.warn(
-              `Failed to post inline comment on PR #${prNumber}: ${(err as Error).message}`,
-            );
+        // If JSON parsed, post inline comments
+        if (review?.comments?.length) {
+          const repoSlug = taskRepoUrl ? this.extractSlug(taskRepoUrl) : repo;
+          for (const comment of review.comments) {
+            try {
+              await this.codeHost.addReviewComment(repoSlug, prNumber, {
+                body: comment.body,
+                path: comment.file,
+                line: comment.line,
+              });
+            } catch (err) {
+              this.logger.warn(`Failed to post inline comment on PR #${prNumber}: ${(err as Error).message}`);
+            }
           }
         }
 
         // Post summary as PR comment
-        try {
-          const summaryBody = [
-            `## Orchestra Code Review`,
-            ``,
-            `**Verdict:** ${review.approved ? 'Approved' : 'Changes Requested'}`,
-            ``,
-            review.summary,
-            ``,
-            `*${review.comments.length} inline comment(s) posted.*`,
-          ].join('\n');
-
-          await this.codeHost.addPRComment(repo, prNumber, summaryBody);
-        } catch (err) {
-          this.logger.warn(
-            `Failed to post PR summary comment on PR #${prNumber}: ${(err as Error).message}`,
-          );
+        const summary = review?.summary ?? rawOutput.substring(0, 1000);
+        if (summary) {
+          const repoSlug = taskRepoUrl ? this.extractSlug(taskRepoUrl) : repo;
+          try {
+            await this.codeHost.addPRComment(repoSlug, prNumber,
+              `## Orchestra Code Review\n\n${summary}\n\n${review?.approved ? '✅ **Approved**' : '⚠️ **Changes requested**'}`,
+            );
+          } catch (err) {
+            this.logger.warn(`Failed to post PR comment on #${prNumber}: ${(err as Error).message}`);
+          }
         }
 
-        prState.reviewStatus = review.approved ? 'approved' : 'changes_requested';
-        prState.reviewComments = review.comments;
+        prState.reviewStatus = review?.approved ? 'approved' : 'changes_requested';
+        prState.reviewComments = review?.comments ?? [];
       } catch (err) {
         this.logger.warn(
-          `Failed to spawn review agent for PR ${task.prUrl}: ${(err as Error).message}`,
+          `Failed to review PR ${task.prUrl}: ${(err as Error).message}`,
         );
+      } finally {
+        if (clonedDir) this.repoCloner.cleanupClone(clonedDir);
       }
     }
 

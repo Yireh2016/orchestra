@@ -8,3 +8,4 @@
 - [session_2026_03_26_bugs.md](session_2026_03_26_bugs.md) — Validation bugs found and fixed (17 fixed, 3 remaining)
 - [feedback_workflow_resilience.md](feedback_workflow_resilience.md) — Workflows must be resumable from broken state
 - [bug_token_refresh.md](bug_token_refresh.md) — HIGH PRIORITY: integration tokens lost/invalid after restart
+- [feedback_project_required.md](feedback_project_required.md) — projectId must be required for workflow creation
