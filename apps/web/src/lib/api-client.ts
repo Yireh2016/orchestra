@@ -233,7 +233,9 @@ export async function publishTemplate(id: string): Promise<WorkflowTemplate> {
 // --- Agents ---
 
 export async function getAgents(): Promise<Agent[]> {
-  return request<Agent[]>("/agents");
+  const result = await request<{ count: number; agents: Agent[] } | Agent[]>("/agents");
+  if (Array.isArray(result)) return result;
+  return result.agents ?? [];
 }
 
 export async function getAgent(id: string): Promise<Agent> {
