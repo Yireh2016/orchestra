@@ -90,6 +90,7 @@ export class InterviewHandler implements PhaseHandler {
               questions: [],
               responses: existingComments.map(c => ({ author: c.author, content: c.body, timestamp: new Date() })),
               spec,
+              specPostedAt: new Date().toISOString(),
               analysisResult: 'complete',
             },
           },
@@ -164,9 +165,13 @@ export class InterviewHandler implements PhaseHandler {
       interview.responses = interview.responses ?? [];
       interview.responses.push({ author, content: commentText, timestamp: new Date().toISOString() });
 
-      // Check for approval keywords
+      // Check for approval keywords — only accept comments after the spec was posted
       const lower = commentText.toLowerCase().trim();
-      if (interview.status === 'spec_ready' && lower.match(/\b(approve|approved|lgtm|looks good)\b/)) {
+      const commentCreatedAt = typeof rawComment === 'object' && rawComment !== null
+        ? new Date((rawComment as any).createdAt ?? 0) : new Date(0);
+      const specPostedAt = interview.specPostedAt ? new Date(interview.specPostedAt) : new Date(0);
+
+      if (interview.status === 'spec_ready' && lower.match(/\b(approve|approved|lgtm|looks good)\b/) && commentCreatedAt > specPostedAt) {
         await this.markApproved(workflowRun, author);
         return;
       }
@@ -418,6 +423,7 @@ Respond with ONLY the JSON.`;
         if (result.ready && result.spec) {
           interview.spec = result.spec;
           interview.status = 'spec_ready';
+          interview.specPostedAt = new Date().toISOString();
 
           try {
             await this.pmAdapter.addComment(workflowRun.ticketId, [
@@ -523,6 +529,7 @@ Respond with ONLY the JSON.`;
 
     interview.spec = spec;
     interview.status = 'spec_ready';
+    interview.specPostedAt = new Date().toISOString();
 
     try {
       await this.pmAdapter.addComment(workflowRun.ticketId, [

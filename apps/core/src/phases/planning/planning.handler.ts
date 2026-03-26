@@ -145,6 +145,7 @@ Respond with ONLY the JSON.`;
               tasks: plan.tasks,
               dag,
               executionGroups,
+              planPostedAt: new Date().toISOString(),
             },
           } as any,
         },
@@ -200,7 +201,17 @@ Respond with ONLY the JSON.`;
         ? (rawComment as any).body ?? ''
         : (rawComment ?? '') as string;
 
-      // Only accept approval for comments that are clearly about the plan
+      // Only accept comments posted AFTER the plan was generated (ignore old "approve" comments)
+      const commentCreatedAt = typeof rawComment === 'object' && rawComment !== null
+        ? new Date((rawComment as any).createdAt ?? 0)
+        : new Date(0);
+      const planPostedAt = planning.planPostedAt ? new Date(planning.planPostedAt) : new Date(0);
+
+      if (commentCreatedAt < planPostedAt) {
+        this.logger.log(`Ignoring old comment (${commentCreatedAt.toISOString()}) — plan was posted at ${planPostedAt.toISOString()}`);
+        return;
+      }
+
       if (commentText.toLowerCase().match(/\b(approve|approved|lgtm|looks good|go ahead)\b/)) {
         planning.status = 'approved';
         planning.approvedAt = new Date().toISOString();
