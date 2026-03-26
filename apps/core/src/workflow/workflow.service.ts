@@ -57,6 +57,13 @@ export class WorkflowService {
     });
   }
 
+  async getTasksByWorkflowId(workflowRunId: string) {
+    return this.prisma.task.findMany({
+      where: { workflowRunId },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
+
   async transitionState(id: string, targetState: WorkflowState) {
     const run = await this.findById(id);
     const currentState = run.state as WorkflowState;

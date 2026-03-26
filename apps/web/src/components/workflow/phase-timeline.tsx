@@ -84,7 +84,7 @@ export function PhaseTimeline({ phases }: PhaseTimelineProps) {
           const styles = statusStyles(phase.status);
           const duration = formatDuration(phase.startedAt, phase.completedAt);
           return (
-            <div key={phase.id} className="flex items-center">
+            <div key={phase.id ?? `phase-${i}`} className="flex items-center">
               <div
                 className="relative flex flex-col items-center"
                 onMouseEnter={() => setHoveredPhase(phase.id)}
@@ -144,7 +144,7 @@ export function PhaseTimeline({ phases }: PhaseTimelineProps) {
           const styles = statusStyles(phase.status);
           const duration = formatDuration(phase.startedAt, phase.completedAt);
           return (
-            <div key={phase.id} className="flex items-start gap-3">
+            <div key={phase.id ?? `phase-${i}`} className="flex items-start gap-3">
               <div className="flex flex-col items-center">
                 <div
                   className={`flex h-9 w-9 items-center justify-center rounded-full border-2 transition-all ${styles.node}`}

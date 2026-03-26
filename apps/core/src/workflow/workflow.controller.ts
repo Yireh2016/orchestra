@@ -34,6 +34,11 @@ export class WorkflowController {
     return this.workflowService.findById(id);
   }
 
+  @Get(':id/tasks')
+  async getWorkflowTasks(@Param('id') id: string) {
+    return this.workflowService.getTasksByWorkflowId(id);
+  }
+
   @Post()
   async create(@Body() body: { templateId: string; ticketId: string }) {
     const run = await this.workflowService.create(body);
