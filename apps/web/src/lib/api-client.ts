@@ -149,7 +149,7 @@ export async function getWorkflow(id: string): Promise<Workflow> {
 export async function createWorkflow(data: {
   ticketId: string;
   templateId: string;
-  context?: Record<string, unknown>;
+  projectId?: string;
 }): Promise<Workflow> {
   return request<Workflow>("/workflows", {
     method: "POST",

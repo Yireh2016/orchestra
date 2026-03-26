@@ -75,12 +75,12 @@ export default function WorkflowsPage() {
     if (!newTemplateId || !newTicketId.trim()) return;
     setCreating(true);
     try {
-      const payload: { templateId: string; ticketId: string; context?: Record<string, unknown> } = {
+      const payload: { templateId: string; ticketId: string; projectId?: string } = {
         templateId: newTemplateId,
         ticketId: newTicketId.trim(),
       };
       if (newProjectId) {
-        payload.context = { projectId: newProjectId };
+        payload.projectId = newProjectId;
       }
       await createWorkflow(payload);
       setShowModal(false);
