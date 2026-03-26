@@ -177,43 +177,45 @@ export class ExecutionHandler implements PhaseHandler {
       });
 
       if (allPassed) {
+        const task = await this.prisma.task.findUnique({ where: { id: taskId } });
+        const planTasks = (phaseData.planning?.tasks ?? phaseData.plan?.tasks ?? []) as any[];
+        const planTask = planTasks.find((t: any) => t.id === task?.ticketId);
+
         this.logger.log(`Task ${taskId} passed all gates`);
 
-        // Check for newly unblocked downstream tasks
+        // Create PR immediately for this task if branch was pushed
+        if (task) {
+          try {
+            const pr = await this.codeHost.createPullRequest({
+              title: `[Orchestra] ${task.ticketId}: ${planTask?.title ?? task.ticketId}`,
+              body: `Automated PR by Orchestra.\n\nWorkflow: ${workflowRun.id}\nTask: ${task.ticketId}`,
+              sourceBranch: task.branch,
+              targetBranch: baseBranch,
+              repo: repoSlug,
+            });
+            await this.prisma.task.update({ where: { id: task.id }, data: { prUrl: pr.url } });
+            this.logger.log(`Created PR for task ${task.id}: ${pr.url}`);
+          } catch (err) {
+            this.logger.warn(`Failed to create PR for task ${task.id}: ${(err as Error).message}`);
+          }
+        }
+
+        // Enqueue unblocked downstream tasks
         await this.enqueueUnblockedTasks(workflowRun, repoSlug, repoUrl, baseBranch);
 
         // Check if all tasks are done
         const allTasks = await this.prisma.task.findMany({
           where: { workflowRunId: workflowRun.id },
         });
-
         const allTasksPassed = allTasks.every((t) => t.status === 'PASSED');
 
         if (allTasksPassed) {
-          // Create PRs for each task
-          for (const task of allTasks) {
-            try {
-              const pr = await this.codeHost.createPullRequest({
-                title: `[Orchestra] ${task.ticketId}`,
-                body: `Automated PR for task ${task.ticketId}.\n\nWorkflow Run: ${workflowRun.id}`,
-                sourceBranch: task.branch,
-                targetBranch: baseBranch,
-                repo: repoSlug,
-              });
+          this.logger.log(`All ${allTasks.length} tasks passed — execution phase complete`);
 
-              await this.prisma.task.update({
-                where: { id: task.id },
-                data: { prUrl: pr.url },
-              });
-            } catch (err) {
-              this.logger.warn(
-                `Failed to create PR for task ${task.id}: ${(err as Error).message}`,
-              );
-            }
-          }
-
+          // Mark execution as completed so polling advances to review
           execution.status = 'completed';
           execution.completedAt = new Date().toISOString();
+          execution.allTasksPassed = true;
           execution.readyForCompletion = true;
 
           await this.prisma.workflowRun.update({

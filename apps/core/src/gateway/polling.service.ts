@@ -453,6 +453,15 @@ export class PollingService implements OnModuleInit, OnModuleDestroy {
       await this.orchestrator.completeCurrentPhase(run.id);
     }
 
+    // Execution phase: auto-advance when all tasks passed
+    if (freshRun.state === 'EXECUTING' && phaseData.execution?.allTasksPassed) {
+      const key = `phase-complete:${run.id}:execution`;
+      if (wasAlreadyCompleted('execution')) return;
+      await markCompleted('execution');
+      this.logger.log(`All tasks passed for workflow ${run.id} — triggering execution phase completion`);
+      await this.orchestrator.completeCurrentPhase(run.id);
+    }
+
     // Planning phase: auto-advance when plan is approved
     if (freshRun.state === 'PLANNING' && phaseData.planning?.status === 'approved') {
       if (wasAlreadyCompleted('planning')) return;

@@ -1,6 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { execFile } from 'child_process';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { AdapterConfigService } from '../adapters/adapter-config.service';
 
 export interface RunTaskParams {
@@ -71,72 +74,162 @@ export class ContainerService {
 
   /**
    * Process mode: Run Claude Code CLI directly as a child process.
-   * Fastest for local development -- no container overhead.
+   * Clones the repo, runs Claude Code, commits and pushes changes.
    */
   private async runAsProcess(params: RunTaskParams): Promise<TaskRunResult> {
     const apiKey = await this.resolveApiKey();
-    const prompt = this.buildPrompt(params);
     const timeout = params.timeout || 600_000;
+    const taskId = params.taskId;
 
-    // Find claude binary path
-    const claudeBin = process.env.CLAUDE_BIN || 'claude';
-    this.logger.log(
-      `[process] Spawning claude CLI for task ${params.taskId} (binary: ${claudeBin}, timeout: ${timeout}ms)`,
-    );
+    // 1. Create a temp working directory
+    const tmpDir = path.join(os.tmpdir(), `orchestra-${taskId}`);
 
-    const startTime = Date.now();
+    this.logger.log(`[process] Task ${taskId}: creating workspace at ${tmpDir}`);
 
-    return new Promise<TaskRunResult>((resolve) => {
-      // Set up a timeout warning at 80% of the limit
-      const warningTimeout = setTimeout(() => {
-        this.logger.warn(
-          `[process] Task ${params.taskId} has been running for ${Math.round(timeout * 0.8 / 1000)}s — approaching ${timeout / 1000}s timeout`,
-        );
-      }, timeout * 0.8);
+    try {
+      // 2. Clone the repo (shallow clone for speed)
+      if (params.repoUrl) {
+        this.logger.log(`[process] Task ${taskId}: cloning ${params.repoUrl}...`);
 
-      const child = execFile(
+        // Get GitHub token for authenticated clone
+        const ghConfig = await this.adapterConfig.getConfig('github');
+        const token = ghConfig?.token || process.env.GITHUB_TOKEN || '';
+
+        // Build authenticated URL
+        let cloneUrl = params.repoUrl;
+        if (token && cloneUrl.startsWith('https://')) {
+          cloneUrl = cloneUrl.replace('https://', `https://x-access-token:${token}@`);
+        }
+
+        await this.exec('git', ['clone', '--depth', '50', cloneUrl, tmpDir]);
+
+        // 3. Create and checkout branch
+        const baseBranch = params.baseBranch || 'main';
+        this.logger.log(`[process] Task ${taskId}: creating branch ${params.branch} from ${baseBranch}`);
+
+        await this.exec('git', ['checkout', baseBranch], { cwd: tmpDir });
+        await this.exec('git', ['checkout', '-b', params.branch], { cwd: tmpDir });
+      } else {
+        // No repo URL — use current directory (for testing)
+        fs.mkdirSync(tmpDir, { recursive: true });
+        this.logger.warn(`[process] Task ${taskId}: no repo URL, using empty workspace`);
+      }
+
+      // 4. Build the prompt for Claude Code
+      const prompt = this.buildPrompt(params);
+
+      // 5. Run Claude Code in the cloned repo directory
+      // Use --dangerously-skip-permissions so it can edit files without asking
+      const claudeBin = process.env.CLAUDE_BIN
+        || ['/Users/jainermunoz/.local/bin/claude', `${process.env.HOME}/.local/bin/claude`, '/usr/local/bin/claude']
+          .find(p => { try { fs.accessSync(p); return true; } catch { return false; } })
+        || 'claude';
+
+      this.logger.log(`[process] Task ${taskId}: running Claude Code in ${tmpDir} (timeout: ${timeout}ms)`);
+
+      const startTime = Date.now();
+      const claudeResult = await this.execWithTimeout(
         claudeBin,
-        ['-p', prompt, '--output-format', 'json'],
+        ['-p', prompt, '--output-format', 'json', '--dangerously-skip-permissions'],
         {
-          cwd: params.workingDirectory || process.cwd(),
+          cwd: tmpDir,
           env: { ...process.env, ANTHROPIC_API_KEY: apiKey },
-          maxBuffer: 10 * 1024 * 1024, // 10 MB
-          timeout,
+          maxBuffer: 50 * 1024 * 1024,
         },
-        (error, stdout, stderr) => {
-          clearTimeout(warningTimeout);
-          const elapsed = Date.now() - startTime;
-
-          if (error) {
-            const exitCode = typeof (error as any).code === 'number'
-              ? (error as any).code
-              : 1;
-            const signal = (error as any).signal || 'none';
-            this.logger.warn(
-              `[process] Task ${params.taskId} failed after ${elapsed}ms — exitCode: ${exitCode}, signal: ${signal}, stderr length: ${(stderr || '').length}`,
-            );
-            if (stderr) {
-              this.logger.warn(
-                `[process] Task ${params.taskId} stderr (first 500 chars): ${stderr.slice(0, 500)}`,
-              );
-            }
-            resolve({
-              success: false,
-              output: stderr || error.message,
-              exitCode,
-            });
-          } else {
-            this.logger.log(
-              `[process] Task ${params.taskId} completed successfully in ${elapsed}ms — stdout: ${(stdout || '').length} bytes, stderr: ${(stderr || '').length} bytes`,
-            );
-            resolve({ success: true, output: stdout, exitCode: 0 });
-          }
-        },
+        timeout,
       );
 
-      this.logger.log(
-        `[process] Task ${params.taskId} process started (pid: ${child.pid})`,
-      );
+      const elapsed = Date.now() - startTime;
+      this.logger.log(`[process] Task ${taskId}: Claude Code finished in ${elapsed}ms (exit: ${claudeResult.exitCode})`);
+
+      // Parse output — extract actual result from JSON wrapper
+      let output = claudeResult.stdout;
+      try {
+        const parsed = JSON.parse(output);
+        if (parsed.type === 'result' && parsed.result !== undefined) {
+          output = typeof parsed.result === 'string' ? parsed.result : JSON.stringify(parsed.result);
+        }
+      } catch { /* not JSON-wrapped */ }
+
+      // 6. Check if any files were changed
+      if (params.repoUrl) {
+        const diffResult = await this.exec('git', ['status', '--porcelain'], { cwd: tmpDir });
+        const hasChanges = diffResult.stdout.trim().length > 0;
+
+        if (hasChanges) {
+          this.logger.log(`[process] Task ${taskId}: changes detected, committing...`);
+
+          // Configure git user for the commit
+          await this.exec('git', ['config', 'user.email', 'orchestra@bot.dev'], { cwd: tmpDir });
+          await this.exec('git', ['config', 'user.name', 'Orchestra Bot'], { cwd: tmpDir });
+
+          // Stage all changes, commit, push
+          await this.exec('git', ['add', '-A'], { cwd: tmpDir });
+          await this.exec('git', ['commit', '-m', `[Orchestra] ${params.taskDefinition.title}\n\nAutomated by Orchestra workflow.`], { cwd: tmpDir });
+
+          this.logger.log(`[process] Task ${taskId}: pushing branch ${params.branch}...`);
+          await this.exec('git', ['push', 'origin', params.branch], { cwd: tmpDir });
+
+          this.logger.log(`[process] Task ${taskId}: branch pushed successfully`);
+        } else {
+          this.logger.log(`[process] Task ${taskId}: no file changes detected by Claude Code`);
+        }
+      }
+
+      // 7. Cleanup temp directory
+      try {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      } catch { /* ignore cleanup errors */ }
+
+      return { success: claudeResult.exitCode === 0, output, exitCode: claudeResult.exitCode };
+
+    } catch (err) {
+      this.logger.error(`[process] Task ${taskId} failed: ${(err as Error).message}`);
+      // Cleanup on error
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+      return { success: false, output: (err as Error).message, exitCode: 1 };
+    }
+  }
+
+  // Helper to execute a command and return stdout/stderr
+  private async exec(
+    command: string,
+    args: string[],
+    options?: { cwd?: string; env?: Record<string, string | undefined> },
+  ): Promise<{ stdout: string; stderr: string }> {
+    return new Promise((resolve, reject) => {
+      execFile(command, args, {
+        cwd: options?.cwd,
+        env: options?.env as any,
+        maxBuffer: 50 * 1024 * 1024,
+        timeout: 120000, // 2 min per git command
+      }, (error, stdout, stderr) => {
+        if (error) {
+          this.logger.warn(`Command failed: ${command} ${args.join(' ')} — ${error.message}`);
+          reject(error);
+        } else {
+          resolve({ stdout: stdout ?? '', stderr: stderr ?? '' });
+        }
+      });
+    });
+  }
+
+  // Helper to execute with timeout
+  private async execWithTimeout(
+    command: string,
+    args: string[],
+    options: { cwd?: string; env?: any; maxBuffer?: number },
+    timeout: number,
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    return new Promise((resolve) => {
+      const child = execFile(command, args, { ...options, timeout }, (error, stdout, stderr) => {
+        if (error && !stdout) {
+          resolve({ stdout: '', stderr: stderr ?? error.message, exitCode: (error as any).code ?? 1 });
+        } else {
+          resolve({ stdout: stdout ?? '', stderr: stderr ?? '', exitCode: error ? 1 : 0 });
+        }
+      });
+      this.logger.log(`[process] PID ${child.pid} started for: ${command} ${args.slice(0, 2).join(' ')}...`);
     });
   }
 
@@ -300,22 +393,23 @@ export class ContainerService {
    */
   private buildPrompt(params: RunTaskParams): string {
     const task = params.taskDefinition;
-    return `You are executing a coding task. Here are the details:
+    return `You are a coding agent working on a task. You have full access to the repository cloned in your working directory.
 
-Title: ${task.title}
-Description: ${task.description}
+TASK: ${task.title}
+DESCRIPTION: ${task.description}
 
-Acceptance Criteria:
-${task.acceptanceCriteria?.map((c: string) => `- ${c}`).join('\n') || 'None specified'}
+${task.acceptanceCriteria?.length ? `ACCEPTANCE CRITERIA:\n${task.acceptanceCriteria.map(c => `- ${c}`).join('\n')}` : ''}
 
-Instructions:
-1. Implement the changes described above
-2. Make sure all existing tests still pass
-3. Write new tests if needed
-4. Keep changes minimal and focused
+INSTRUCTIONS:
+1. Read the relevant files to understand the current code
+2. Make the necessary changes to implement this task
+3. Ensure your changes are minimal and focused
+4. Follow existing code patterns and conventions
 
-Working directory: ${params.workingDirectory || '.'}
-Branch: ${params.branch}`;
+BRANCH: ${params.branch}
+
+Do NOT commit or push — the system handles that automatically.
+Just make the code changes needed.`;
   }
 
   /**
