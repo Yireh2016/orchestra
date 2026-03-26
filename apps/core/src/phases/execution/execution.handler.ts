@@ -46,36 +46,63 @@ export class ExecutionHandler implements PhaseHandler {
     ].filter(Boolean).join('\n');
   }
 
-  private getRepoFromProjectContext(workflowRun: WorkflowRun): { slug: string; url: string; defaultBranch: string } | null {
+  /**
+   * Extract repo slug from a URL: https://github.com/owner/repo → owner/repo
+   */
+  private extractSlug(url: string): string {
+    const match = url.match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
+    return match ? match[1] : url;
+  }
+
+  /**
+   * Get the default repo from the project context (fallback when task doesn't specify one).
+   */
+  private getDefaultRepoFromProject(workflowRun: WorkflowRun): { slug: string; url: string; defaultBranch: string } | null {
     const phaseData = workflowRun.phaseData as Record<string, any>;
     const ctx = phaseData._projectContext;
     if (!ctx || !ctx.repositories) return null;
     const repos = ctx.repositories as any[];
     if (repos.length === 0) return null;
 
-    // Pick primary repo, or first one marked as primary, or fallback to first
     const primaryRepo = repos.find((r: any) => r.primary) ?? repos[0];
-    const repoUrl = primaryRepo.url as string;
-    // Extract owner/repo from URL: https://github.com/owner/repo(.git)
-    const match = repoUrl.match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
-    const slug = match ? match[1] : repoUrl;
+    return { slug: this.extractSlug(primaryRepo.url), url: primaryRepo.url, defaultBranch: primaryRepo.defaultBranch || 'main' };
+  }
 
-    return { slug, url: repoUrl, defaultBranch: primaryRepo.defaultBranch || 'main' };
+  /**
+   * Resolve the repo for a specific task. Tasks may specify their own repo from the plan.
+   * Falls back to the project default.
+   */
+  private resolveTaskRepo(
+    taskTicketId: string,
+    phaseData: Record<string, any>,
+    workflowRun: WorkflowRun,
+  ): { slug: string; url: string; defaultBranch: string } {
+    // Check if the plan task specifies a repo
+    const planTasks = (phaseData.planning?.tasks ?? []) as any[];
+    const planTask = planTasks.find((t: any) => t.id === taskTicketId);
+
+    if (planTask?.repo) {
+      const url = planTask.repo;
+      // Find the matching project repo to get the defaultBranch
+      const ctx = phaseData._projectContext;
+      const repos = (ctx?.repositories ?? []) as any[];
+      const match = repos.find((r: any) => r.url === url);
+      return {
+        slug: this.extractSlug(url),
+        url,
+        defaultBranch: match?.defaultBranch || 'main',
+      };
+    }
+
+    // Fallback to project default
+    const defaultRepo = this.getDefaultRepoFromProject(workflowRun);
+    return defaultRepo ?? { slug: '', url: '', defaultBranch: 'main' };
   }
 
   async start(workflowRun: WorkflowRun): Promise<void> {
     this.logger.log(`Starting execution phase for run ${workflowRun.id}`);
 
     const phaseData = workflowRun.phaseData as Record<string, any>;
-    const projectRepo = this.getRepoFromProjectContext(workflowRun);
-    // slug = "owner/repo" for GitHub API, url = full URL for cloning
-    const repoSlug = projectRepo?.slug ?? phaseData.repo ?? '';
-    const repoUrl = projectRepo?.url ?? phaseData.repoUrl ?? '';
-    const baseBranch = projectRepo?.defaultBranch ?? phaseData.baseBranch ?? 'main';
-
-    if (!repoSlug) {
-      this.logger.warn(`No repository configured for workflow ${workflowRun.id}. Create a Project with a repository URL.`);
-    }
 
     // Load all tasks for this workflow run — create from plan if missing
     let tasks = await this.prisma.task.findMany({
@@ -122,35 +149,38 @@ export class ExecutionHandler implements PhaseHandler {
 
     const projectContext = this.getProjectContext(workflowRun);
 
-    // For each ready task: create branch and queue
+    // For each ready task: resolve repo, create branch, queue
     for (const task of readyTasks) {
+      const taskRepo = this.resolveTaskRepo(task.ticketId, phaseData, workflowRun);
+      this.logger.log(`Task ${task.ticketId}: using repo ${taskRepo.slug} (branch: ${taskRepo.defaultBranch})`);
+
       try {
-        await this.codeHost.createBranch(repoSlug, task.branch, baseBranch);
+        await this.codeHost.createBranch(taskRepo.slug, task.branch, taskRepo.defaultBranch);
       } catch (err) {
-        this.logger.warn(
-          `Failed to create branch ${task.branch}: ${(err as Error).message}`,
-        );
+        this.logger.warn(`Failed to create branch ${task.branch}: ${(err as Error).message}`);
       }
+
+      const planTasks = (phaseData.planning?.tasks ?? []) as any[];
+      const planTask = planTasks.find((t: any) => t.id === task.ticketId);
 
       try {
         await this.taskQueue.enqueue({
           taskId: task.id,
           workflowRunId: workflowRun.id,
-          prompt: `${projectContext}Implement the following task on branch ${task.branch}:\n\nTicket: ${task.ticketId}\n\nFollow existing code patterns and conventions.`,
+          prompt: `${projectContext}Implement the following task on branch ${task.branch}:\n\nTask: ${planTask?.title ?? task.ticketId}\nDescription: ${planTask?.description ?? ''}\nRepository: ${taskRepo.url}\n\nFollow existing code patterns and conventions.`,
           workingDirectory: '.',
-          repoUrl: repoUrl,
+          repoUrl: taskRepo.url,
           branch: task.branch,
-          baseBranch,
+          baseBranch: taskRepo.defaultBranch,
           taskDefinition: {
-            title: task.ticketId,
-            description: `Implement task ${task.ticketId} on branch ${task.branch}`,
-            acceptanceCriteria: [],
+            title: planTask?.title ?? task.ticketId,
+            description: planTask?.description ?? `Implement task ${task.ticketId}`,
+            acceptanceCriteria: planTask?.acceptanceCriteria ?? [],
+            gates: planTask?.gates ?? [],
           },
         });
       } catch (err) {
-        this.logger.warn(
-          `Failed to enqueue task ${task.id}: ${(err as Error).message}`,
-        );
+        this.logger.warn(`Failed to enqueue task ${task.id}: ${(err as Error).message}`);
       }
     }
 
@@ -182,10 +212,6 @@ export class ExecutionHandler implements PhaseHandler {
 
     const phaseData = workflowRun.phaseData as Record<string, any>;
     const execution = phaseData.execution ?? { retriesMap: {} };
-    const projectRepo = this.getRepoFromProjectContext(workflowRun);
-    const repoSlug = projectRepo?.slug ?? phaseData.repo ?? '';
-    const repoUrl = projectRepo?.url ?? phaseData.repoUrl ?? '';
-    const baseBranch = projectRepo?.defaultBranch ?? phaseData.baseBranch ?? 'main';
 
     if (event.type === 'task_completed') {
       const taskId = event.payload.taskId as string;
@@ -212,13 +238,14 @@ export class ExecutionHandler implements PhaseHandler {
         // Create PR only if the branch was actually pushed (code changes exist)
         const branchPushed = event.payload.branchPushed as boolean | undefined;
         if (task && branchPushed) {
+          const taskRepo = this.resolveTaskRepo(task.ticketId, phaseData, workflowRun);
           try {
             const pr = await this.codeHost.createPullRequest({
               title: `[Orchestra] ${task.ticketId}: ${planTask?.title ?? task.ticketId}`,
               body: `Automated PR by Orchestra.\n\nWorkflow: ${workflowRun.id}\nTask: ${task.ticketId}`,
               sourceBranch: task.branch,
-              targetBranch: baseBranch,
-              repo: repoSlug,
+              targetBranch: taskRepo.defaultBranch,
+              repo: taskRepo.slug,
             });
             await this.prisma.task.update({ where: { id: task.id }, data: { prUrl: pr.url } });
             this.logger.log(`Created PR for task ${task.id}: ${pr.url}`);
@@ -228,7 +255,7 @@ export class ExecutionHandler implements PhaseHandler {
         }
 
         // Enqueue unblocked downstream tasks
-        await this.enqueueUnblockedTasks(workflowRun, repoSlug, repoUrl, baseBranch);
+        await this.enqueueUnblockedTasks(workflowRun, phaseData);
 
         // Check if all tasks are done
         const allTasks = await this.prisma.task.findMany({
@@ -295,15 +322,16 @@ export class ExecutionHandler implements PhaseHandler {
 
         const healPrompt = `The following gates failed after your previous attempt on branch ${task.branch}:\n${failedGates.map((g: any) => `- ${g.gate ?? g.name}: ${g.error ?? 'failed'}`).join('\n')}\n\nPlease fix the issues. This is retry ${currentRetries + 1} of ${MAX_TASK_RETRIES}.`;
 
+        const healRepo = this.resolveTaskRepo(task.ticketId, phaseData, workflowRun);
         try {
           await this.taskQueue.enqueue({
             taskId: task.id,
             workflowRunId: workflowRun.id,
             prompt: healPrompt,
             workingDirectory: '.',
-            repoUrl: repoUrl,
+            repoUrl: healRepo.url,
             branch: task.branch,
-            baseBranch,
+            baseBranch: healRepo.defaultBranch,
             taskDefinition: {
               title: task.ticketId,
               description: healPrompt,
@@ -348,9 +376,7 @@ export class ExecutionHandler implements PhaseHandler {
 
   private async enqueueUnblockedTasks(
     workflowRun: WorkflowRun,
-    repoSlug: string,
-    repoUrl: string,
-    baseBranch: string,
+    phaseData: Record<string, any>,
   ): Promise<void> {
     const pendingTasks = await this.prisma.task.findMany({
       where: {
@@ -365,29 +391,33 @@ export class ExecutionHandler implements PhaseHandler {
       const allDepsPassed = await this.checkDependenciesMet(task.dependsOn);
 
       if (allDepsPassed) {
-        this.logger.log(`Dependencies met for task ${task.id}, enqueuing`);
+        const taskRepo = this.resolveTaskRepo(task.ticketId, phaseData, workflowRun);
+        const planTasks = (phaseData.planning?.tasks ?? []) as any[];
+        const planTask = planTasks.find((t: any) => t.id === task.ticketId);
+        const projectContext = this.getProjectContext(workflowRun);
+
+        this.logger.log(`Dependencies met for task ${task.id} (repo: ${taskRepo.slug}), enqueuing`);
 
         try {
-          await this.codeHost.createBranch(repoSlug, task.branch, baseBranch);
+          await this.codeHost.createBranch(taskRepo.slug, task.branch, taskRepo.defaultBranch);
         } catch (err) {
-          this.logger.warn(
-            `Failed to create branch ${task.branch}: ${(err as Error).message}`,
-          );
+          this.logger.warn(`Failed to create branch ${task.branch}: ${(err as Error).message}`);
         }
 
         try {
           await this.taskQueue.enqueue({
             taskId: task.id,
             workflowRunId: workflowRun.id,
-            prompt: `Implement the following task on branch ${task.branch}:\n\nTicket: ${task.ticketId}\n\nFollow existing code patterns and conventions.`,
+            prompt: `${projectContext}Implement the following task on branch ${task.branch}:\n\nTask: ${planTask?.title ?? task.ticketId}\nDescription: ${planTask?.description ?? ''}\nRepository: ${taskRepo.url}\n\nFollow existing code patterns and conventions.`,
             workingDirectory: '.',
-            repoUrl: repoUrl,
+            repoUrl: taskRepo.url,
             branch: task.branch,
-            baseBranch,
+            baseBranch: taskRepo.defaultBranch,
             taskDefinition: {
-              title: task.ticketId,
-              description: `Implement task ${task.ticketId} on branch ${task.branch}`,
-              acceptanceCriteria: [],
+              title: planTask?.title ?? task.ticketId,
+              description: planTask?.description ?? `Implement task ${task.ticketId}`,
+              acceptanceCriteria: planTask?.acceptanceCriteria ?? [],
+              gates: planTask?.gates ?? [],
             },
           });
         } catch (err) {

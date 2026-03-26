@@ -52,14 +52,27 @@ export class PlanningHandler implements PhaseHandler {
     // Spawn Claude Code to generate the plan
     this.logger.log(`Spawning Claude Code for plan generation...`);
 
+    // Build repo list for the AI to choose from
+    const projectCtx = phaseData._projectContext;
+    const repoList = (projectCtx?.repositories as any[] ?? [])
+      .map((r: any) => `- ${r.url} (branch: ${r.defaultBranch || 'main'})`)
+      .join('\n');
+
     const prompt = `${projectContext}Based on the following specification and research, create a detailed implementation plan.
-Break the work into PR-sized tasks. For each task specify its title, description, dependencies, and verification commands.
+Break the work into PR-sized tasks. For each task specify its title, description, dependencies, verification commands, and which repository it targets.
 
 ## Specification
 ${spec}
 
 ## Research Findings
 ${research || 'No research findings available.'}
+
+## Available Repositories
+${repoList || 'No repositories configured.'}
+
+IMPORTANT: For each task, select the correct repository from the list above based on where the code changes need to happen. If a task is purely investigative (no code changes), set "repo" to null.
+
+If the entire plan is small enough to be done in a single PR, create just one task.
 
 Respond with ONLY a JSON object in this exact format:
 {
@@ -69,6 +82,7 @@ Respond with ONLY a JSON object in this exact format:
       "id": "task-1",
       "title": "Short task title",
       "description": "What this task does",
+      "repo": "https://github.com/org/repo",
       "dependsOn": [],
       "acceptanceCriteria": ["Criteria 1"],
       "gates": [{"name": "Tests pass", "command": "npm test"}],
