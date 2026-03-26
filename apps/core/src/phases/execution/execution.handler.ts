@@ -235,14 +235,14 @@ export class ExecutionHandler implements PhaseHandler {
 
         this.logger.log(`Task ${taskId} passed all gates`);
 
-        // Create PR only if the branch was actually pushed (code changes exist)
-        const branchPushed = event.payload.branchPushed as boolean | undefined;
-        if (task && branchPushed) {
+        // Create PR for tasks that target a repo (non-null repo in plan)
+        // Skip tasks with repo=null (investigation/admin tasks)
+        if (task && planTask?.repo) {
           const taskRepo = this.resolveTaskRepo(task.ticketId, phaseData, workflowRun);
           try {
             const pr = await this.codeHost.createPullRequest({
               title: `[Orchestra] ${task.ticketId}: ${planTask?.title ?? task.ticketId}`,
-              body: `Automated PR by Orchestra.\n\nWorkflow: ${workflowRun.id}\nTask: ${task.ticketId}`,
+              body: `Automated PR by Orchestra.\n\nWorkflow: ${workflowRun.id}\nTask: ${task.ticketId}\n\n${planTask?.description ?? ''}`,
               sourceBranch: task.branch,
               targetBranch: taskRepo.defaultBranch,
               repo: taskRepo.slug,
@@ -250,8 +250,11 @@ export class ExecutionHandler implements PhaseHandler {
             await this.prisma.task.update({ where: { id: task.id }, data: { prUrl: pr.url } });
             this.logger.log(`Created PR for task ${task.id}: ${pr.url}`);
           } catch (err) {
-            this.logger.warn(`Failed to create PR for task ${task.id}: ${(err as Error).message}`);
+            // 422 = branch doesn't exist or no diff (task made no changes) — that's fine
+            this.logger.warn(`PR not created for task ${task.id}: ${(err as Error).message}`);
           }
+        } else {
+          this.logger.log(`Task ${taskId}: no repo in plan — skipping PR creation`);
         }
 
         // Enqueue unblocked downstream tasks
