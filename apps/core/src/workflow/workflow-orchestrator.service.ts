@@ -75,7 +75,7 @@ export class WorkflowOrchestratorService implements OnModuleInit {
     // Wire up the task completion callback so agent-runtime results flow back
     // into the orchestrator's phase logic.
     this.taskQueue.setOnTaskCompleted(async (data) => {
-      await this.handleTaskCompleted(data.workflowRunId, data.taskId);
+      await this.handleTaskCompleted(data.workflowRunId, data.taskId, data.branchPushed);
     });
     this.logger.log('Task completion callback registered with TaskQueueService');
   }
@@ -217,18 +217,19 @@ export class WorkflowOrchestratorService implements OnModuleInit {
   async handleTaskCompleted(
     workflowRunId: string,
     taskId: string,
+    branchPushed?: boolean,
   ): Promise<void> {
     this.eventBus.emit({
       type: 'task.completed',
       workflowRunId,
       taskId,
-      payload: {},
+      payload: { branchPushed },
     });
 
     await this.handleEvent(workflowRunId, {
       type: 'task_completed',
       source: 'agent-runtime',
-      payload: { taskId },
+      payload: { taskId, branchPushed },
       timestamp: new Date(),
     });
   }
