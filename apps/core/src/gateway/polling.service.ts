@@ -111,7 +111,33 @@ export class PollingService implements OnModuleInit, OnModuleDestroy {
     );
     this.intervals.push(githubInterval);
 
-    this.logger.log('Polling started for Jira and GitHub');
+    // Poll for phase completion (auto-advance phases that don't need human input)
+    const phaseInterval = setInterval(
+      () => this.pollPhaseCompletion(),
+      this.pollIntervalMs,
+    );
+    this.intervals.push(phaseInterval);
+
+    this.logger.log('Polling started for Jira, GitHub, and phase completion');
+  }
+
+  private async pollPhaseCompletion() {
+    try {
+      const activeRuns = await this.prisma.workflowRun.findMany({
+        where: {
+          state: { notIn: ['DONE', 'FAILED', 'CANCELLED'] },
+        },
+      });
+      for (const run of activeRuns) {
+        try {
+          await this.checkPhaseCompletion(run);
+        } catch (err) {
+          this.logger.warn(`Phase completion check failed for ${run.id}: ${(err as Error).message}`);
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`Phase completion polling failed: ${(err as Error).message}`);
+    }
   }
 
   private stopPolling() {
@@ -402,6 +428,16 @@ export class PollingService implements OnModuleInit, OnModuleDestroy {
       this.lastSeen.set(key, 'true');
 
       this.logger.log(`Interview approved for workflow ${run.id} — triggering phase completion`);
+      await this.orchestrator.completeCurrentPhase(run.id);
+    }
+
+    // Research phase: auto-advance when research is completed (no human approval needed)
+    if (freshRun.state === 'RESEARCHING' && phaseData.research?.status === 'completed') {
+      const key = `phase-complete:${run.id}:research`;
+      if (this.lastSeen.has(key)) return;
+      this.lastSeen.set(key, 'true');
+
+      this.logger.log(`Research completed for workflow ${run.id} — triggering phase completion`);
       await this.orchestrator.completeCurrentPhase(run.id);
     }
 

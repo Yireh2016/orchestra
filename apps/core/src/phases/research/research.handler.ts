@@ -73,6 +73,9 @@ Output a structured research document with:
 5. Risks and considerations`;
 
     let agentInstanceId: string | null = null;
+    let researchOutput = '';
+    let researchStatus = 'agent_unavailable';
+
     try {
       const agentInstance = await this.codingAgent.spawn({
         prompt,
@@ -80,6 +83,9 @@ Output a structured research document with:
         timeout: 300000,
       });
       agentInstanceId = agentInstance.id;
+      researchOutput = agentInstance.output ?? '';
+      researchStatus = agentInstance.status === 'completed' ? 'completed' : 'failed';
+      this.logger.log(`Research agent finished: ${researchOutput.length} bytes, status=${researchStatus}`);
     } catch (err) {
       this.logger.warn(
         `Failed to spawn coding agent for research: ${(err as Error).message}`,
@@ -94,11 +100,12 @@ Output a structured research document with:
           research: {
             ...phaseData.research,
             agentInstanceId,
-            status: agentInstanceId ? 'researching' : 'agent_unavailable',
+            status: researchStatus,
             startedAt: new Date().toISOString(),
-            artifacts: {},
+            completedAt: researchStatus === 'completed' ? new Date().toISOString() : undefined,
+            artifacts: researchOutput ? { research: researchOutput } : {},
           },
-        },
+        } as any,
       },
     });
 
