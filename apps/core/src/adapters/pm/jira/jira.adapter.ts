@@ -73,11 +73,7 @@ export class JiraAdapter implements PMAdapter {
       id: data.id,
       key: data.key,
       summary: data.fields.summary,
-      description: data.fields.description?.content
-        ?.map((block: any) =>
-          block.content?.map((c: any) => c.text).join(''),
-        )
-        .join('\n') ?? '',
+      description: this.extractTextFromAdf(data.fields.description),
       status: data.fields.status.name,
       assignee: data.fields.assignee?.displayName ?? null,
       labels: data.fields.labels ?? [],
@@ -138,11 +134,7 @@ export class JiraAdapter implements PMAdapter {
     return data.comments.map((c: any) => ({
       id: c.id,
       author: c.author.displayName,
-      body: c.body?.content
-        ?.map((block: any) =>
-          block.content?.map((t: any) => t.text).join(''),
-        )
-        .join('\n') ?? '',
+      body: this.extractTextFromAdf(c.body),
       createdAt: new Date(c.created),
     }));
   }
@@ -266,11 +258,7 @@ export class JiraAdapter implements PMAdapter {
       id: issue.id,
       key: issue.key,
       summary: issue.fields.summary,
-      description: issue.fields.description?.content
-        ?.map((block: any) =>
-          block.content?.map((c: any) => c.text).join(''),
-        )
-        .join('\n') ?? '',
+      description: this.extractTextFromAdf(issue.fields.description),
       status: issue.fields.status.name,
       assignee: issue.fields.assignee?.displayName ?? null,
       labels: issue.fields.labels ?? [],
@@ -324,5 +312,56 @@ export class JiraAdapter implements PMAdapter {
       }),
     });
     if (!response.ok) throw new Error(`Jira linkTickets failed: ${response.status}`);
+  }
+
+  /**
+   * Recursively extract plain text from Atlassian Document Format (ADF).
+   * Handles paragraphs, headings, lists, code blocks, mentions, links, etc.
+   */
+  private extractTextFromAdf(adf: any): string {
+    if (!adf || !adf.content) return '';
+
+    const extractNode = (node: any): string => {
+      if (!node) return '';
+
+      // Text node
+      if (node.type === 'text') return node.text ?? '';
+
+      // Mention node (@user)
+      if (node.type === 'mention') return node.attrs?.text ?? `@${node.attrs?.id ?? 'user'}`;
+
+      // Emoji
+      if (node.type === 'emoji') return node.attrs?.shortName ?? '';
+
+      // Hard break
+      if (node.type === 'hardBreak') return '\n';
+
+      // Inline card (link)
+      if (node.type === 'inlineCard') return node.attrs?.url ?? '';
+
+      // Block nodes with children
+      if (node.content && Array.isArray(node.content)) {
+        const childText = node.content.map(extractNode).join('');
+
+        switch (node.type) {
+          case 'paragraph': return childText + '\n';
+          case 'heading': return childText + '\n';
+          case 'bulletList':
+          case 'orderedList': return childText;
+          case 'listItem': return '- ' + childText;
+          case 'codeBlock': return '```\n' + childText + '\n```\n';
+          case 'blockquote': return '> ' + childText;
+          case 'table':
+          case 'tableRow':
+          case 'tableCell':
+          case 'tableHeader': return childText + ' | ';
+          default: return childText;
+        }
+      }
+
+      return '';
+    };
+
+    return adf.content.map(extractNode).join('').trim();
   }
 }
