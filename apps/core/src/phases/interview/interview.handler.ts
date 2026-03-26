@@ -9,6 +9,8 @@ import { PrismaService } from '../../common/database/prisma.service';
 import { ConflictDetectorService } from './conflict-detector.service';
 import { PM_ADAPTER } from '../../adapters/interfaces/pm-adapter.interface';
 import type { PMAdapter } from '../../adapters/interfaces/pm-adapter.interface';
+import { CODING_AGENT_ADAPTER } from '../../adapters/interfaces/coding-agent-adapter.interface';
+import type { CodingAgentAdapter } from '../../adapters/interfaces/coding-agent-adapter.interface';
 
 @Injectable()
 export class InterviewHandler implements PhaseHandler {
@@ -18,6 +20,7 @@ export class InterviewHandler implements PhaseHandler {
     private readonly prisma: PrismaService,
     private readonly conflictDetector: ConflictDetectorService,
     @Inject(PM_ADAPTER) private readonly pmAdapter: PMAdapter,
+    @Inject(CODING_AGENT_ADAPTER) private readonly codingAgent: CodingAgentAdapter,
   ) {}
 
   async start(workflowRun: WorkflowRun): Promise<void> {
@@ -25,111 +28,127 @@ export class InterviewHandler implements PhaseHandler {
 
     const ticketId = workflowRun.ticketId;
 
-    // Fetch ticket details to generate context-aware questions
+    // Fetch ticket details + existing comments
     let ticketTitle = '';
     let ticketDescription = '';
     let ticketLabels: string[] = [];
+    let existingComments: Array<{ author: string; body: string }> = [];
+
     try {
       const ticket = await this.pmAdapter.getTicket(ticketId);
       ticketTitle = ticket.summary;
       ticketDescription = ticket.description;
       ticketLabels = ticket.labels ?? [];
     } catch (err) {
-      this.logger.warn(
-        `Failed to fetch ticket ${ticketId}: ${(err as Error).message}`,
-      );
+      this.logger.warn(`Failed to fetch ticket ${ticketId}: ${(err as Error).message}`);
     }
 
-    // Generate initial interview questions based on the ticket content
-    const questions = this.generateInitialQuestions(
+    try {
+      const comments = await this.pmAdapter.getComments(ticketId);
+      existingComments = comments.map(c => ({ author: c.author, body: c.body }));
+    } catch (err) {
+      this.logger.warn(`Failed to fetch comments for ${ticketId}: ${(err as Error).message}`);
+    }
+
+    // Use AI to analyze the ticket and decide: ask questions or go straight to spec
+    const analysis = await this.analyzeTicketCompleteness(
       ticketTitle,
       ticketDescription,
       ticketLabels,
+      existingComments,
     );
 
-    const commentBody = [
-      `**Requirements Interview** for *${ticketTitle || ticketId}*`,
-      '',
-      'I need to gather some information before we proceed. Please answer the following questions:',
-      '',
-      ...questions.map((q, i) => `${i + 1}. ${q}`),
-      '',
-      '_Reply to this comment with your answers. Tag additional stakeholders if needed._',
-    ].join('\n');
+    if (analysis.isComplete) {
+      // Ticket has enough information — go straight to spec
+      this.logger.log(`Ticket ${ticketId} has sufficient information — generating spec directly`);
 
-    try {
-      await this.pmAdapter.addComment(ticketId, commentBody);
-    } catch (err) {
-      this.logger.warn(
-        `Failed to post interview questions to ${ticketId}: ${(err as Error).message}`,
-      );
-    }
+      const spec = analysis.spec;
 
-    await this.prisma.workflowRun.update({
-      where: { id: workflowRun.id },
-      data: {
-        phaseData: {
-          ...(workflowRun.phaseData as Record<string, unknown>),
-          interview: {
-            status: 'active',
-            ticketId,
-            questions,
-            responses: [],
-            spec: '',
-          },
-        },
-      },
-    });
-  }
+      const specMessage = [
+        '**Draft Specification** (generated from ticket details)',
+        '',
+        spec,
+        '',
+        '_The ticket had sufficient information to generate this spec. Please review and reply with **"approve"** to proceed, or provide feedback._',
+      ].join('\n');
 
-  async handleEvent(
-    workflowRun: WorkflowRun,
-    event: PhaseEvent,
-  ): Promise<void> {
-    this.logger.log(
-      `Interview event for run ${workflowRun.id}: ${event.type}`,
-    );
-
-    // Handle spec approval
-    if (event.type === 'approve_spec' || event.type === 'interview_complete') {
-      const phaseData = workflowRun.phaseData as Record<string, any>;
-      const interview = phaseData.interview ?? {};
-
-      interview.status = 'approved';
-      interview.approvedBy = event.source;
-      interview.approvedAt = new Date().toISOString();
-
-      // Synthesize final spec from all responses if not already set
-      if (!interview.spec) {
-        interview.spec = this.synthesizeSpec(
-          interview.questions ?? [],
-          interview.responses ?? [],
-        );
+      try {
+        await this.pmAdapter.addComment(ticketId, specMessage);
+      } catch (err) {
+        this.logger.warn(`Failed to post spec: ${(err as Error).message}`);
       }
 
       await this.prisma.workflowRun.update({
         where: { id: workflowRun.id },
         data: {
-          phaseData: { ...phaseData, interview },
+          phaseData: {
+            ...(workflowRun.phaseData as Record<string, unknown>),
+            interview: {
+              status: 'spec_ready',
+              ticketId,
+              questions: [],
+              responses: existingComments.map(c => ({ author: c.author, content: c.body, timestamp: new Date() })),
+              spec,
+              analysisResult: 'complete',
+            },
+          },
         },
       });
+    } else {
+      // Ticket needs more info — ask targeted questions
+      const questions = analysis.questions;
 
-      this.logger.log(
-        `Interview phase approved for run ${workflowRun.id} by ${event.source}`,
-      );
+      const commentBody = [
+        `**Requirements Interview** for *${ticketTitle || ticketId}*`,
+        '',
+        'I\'ve reviewed the ticket and need some clarification on a few points:',
+        '',
+        ...questions.map((q, i) => `${i + 1}. ${q}`),
+        '',
+        '_Reply with your answers. Say **"done"** when you have nothing more to add._',
+      ].join('\n');
+
+      try {
+        await this.pmAdapter.addComment(ticketId, commentBody);
+      } catch (err) {
+        this.logger.warn(`Failed to post interview questions: ${(err as Error).message}`);
+      }
+
+      await this.prisma.workflowRun.update({
+        where: { id: workflowRun.id },
+        data: {
+          phaseData: {
+            ...(workflowRun.phaseData as Record<string, unknown>),
+            interview: {
+              status: 'active',
+              ticketId,
+              questions,
+              questionsPosted: true,
+              responses: [],
+              spec: '',
+              analysisResult: 'needs_info',
+            },
+          },
+        },
+      });
+    }
+  }
+
+  async handleEvent(workflowRun: WorkflowRun, event: PhaseEvent): Promise<void> {
+    this.logger.log(`Interview event for run ${workflowRun.id}: ${event.type}`);
+
+    // Handle explicit approval
+    if (event.type === 'approve_spec' || event.type === 'interview_complete') {
+      await this.markApproved(workflowRun, event.source);
       return;
     }
 
-    // Handle new Jira comment on the ticket
+    // Handle new Jira comment
     if (event.type === 'ticket.commented') {
       const phaseData = workflowRun.phaseData as Record<string, any>;
-      const interview = phaseData.interview ?? {
-        questions: [],
-        responses: [],
-        spec: '',
-      };
+      const interview = phaseData.interview ?? { questions: [], responses: [], spec: '' };
 
-      // Handle both webhook format (payload.comment = string) and polling format (payload.comment = { body, author })
+      // Extract comment text
       const rawComment = event.payload.comment;
       const commentText = typeof rawComment === 'object' && rawComment !== null
         ? (rawComment as any).body ?? ''
@@ -138,170 +157,56 @@ export class InterviewHandler implements PhaseHandler {
         ? (rawComment as any).author ?? event.source
         : (event.payload.author ?? event.source) as string;
 
-      const response = {
-        author,
-        content: commentText,
-        timestamp: event.timestamp,
-      };
+      if (!commentText.trim()) return; // Skip empty comments
 
+      // Store response
       interview.responses = interview.responses ?? [];
-      interview.responses.push(response);
+      interview.responses.push({ author, content: commentText, timestamp: new Date().toISOString() });
 
-      // Check for conflicts with previous responses
+      // Check for approval keywords
+      const lower = commentText.toLowerCase().trim();
+      if (interview.status === 'spec_ready' && lower.match(/\b(approve|approved|lgtm|looks good)\b/)) {
+        await this.markApproved(workflowRun, author);
+        return;
+      }
+
+      // Check for "done" signal — synthesize spec from all info
+      if (lower.match(/\b(done|ready|that'?s all|proceed|go ahead|no more questions)\b/)) {
+        await this.synthesizeAndPostSpec(workflowRun, interview, phaseData);
+        return;
+      }
+
+      // Check for conflicts
       const conflictResult = await this.conflictDetector.detectConflicts(
-        interview.responses.map((r: any) => ({
-          from: r.author,
-          content: r.content,
-          timestamp: r.timestamp,
-        })),
+        interview.responses.map((r: any) => ({ from: r.author, content: r.content, timestamp: r.timestamp })),
       );
 
       if (conflictResult.hasConflict) {
         interview.status = 'paused_conflict';
         interview.conflicts = conflictResult.conflictingStatements;
-
         const conflictMessage = [
           '**Conflict Detected**',
           '',
-          'The following statements appear to contradict each other:',
-          '',
           ...conflictResult.conflictingStatements.map(
-            (c: any) =>
-              `- *${c.author1}* said: "${c.statement1}"\n  vs *${c.author2}* said: "${c.statement2}"\n  Reason: ${c.reason}`,
+            (c: any) => `- *${c.author1}*: "${c.statement1}"\n  vs *${c.author2}*: "${c.statement2}"\n  _${c.reason}_`,
           ),
           '',
-          '_Please clarify these points before we can proceed._',
+          '_Please clarify before we proceed._',
         ].join('\n');
 
-        try {
-          await this.pmAdapter.addComment(workflowRun.ticketId, conflictMessage);
-        } catch (err) {
-          this.logger.warn(
-            `Failed to post conflict notification: ${(err as Error).message}`,
-          );
+        try { await this.pmAdapter.addComment(workflowRun.ticketId, conflictMessage); } catch (err) {
+          this.logger.warn(`Failed to post conflict: ${(err as Error).message}`);
         }
       } else {
-        // Track conversation rounds to know when to stop
-        interview.round = (interview.round ?? 0) + 1;
-        const MAX_ROUNDS = 3; // After 3 rounds of Q&A, synthesize spec
-
-        const allResponses = interview.responses as Array<{
-          author: string;
-          content: string;
-        }>;
-
-        // Check if user replied "approve" to a draft spec
-        if (interview.status === 'spec_ready' && commentText.toLowerCase().includes('approve')) {
-          interview.status = 'approved';
-          this.logger.log(`Spec approved for workflow ${workflowRun.id}`);
-        }
-        // If we've had enough rounds OR user says "done"/"ready"/"that's all", synthesize
-        else if (
-          interview.round >= MAX_ROUNDS ||
-          commentText.toLowerCase().match(/\b(done|ready|that'?s all|no more|proceed|looks good|go ahead)\b/)
-        ) {
-          interview.spec = this.synthesizeSpec(
-            interview.questions ?? [],
-            allResponses,
-          );
-          interview.status = 'spec_ready';
-
-          const specMessage = [
-            '**Draft Specification**',
-            '',
-            interview.spec,
-            '',
-            '_Please review and reply with **"approve"** to proceed to the next phase, or provide additional feedback._',
-          ].join('\n');
-
-          try {
-            await this.pmAdapter.addComment(workflowRun.ticketId, specMessage);
-          } catch (err) {
-            this.logger.warn(
-              `Failed to post draft spec: ${(err as Error).message}`,
-            );
-          }
-        }
-        // Otherwise, generate follow-up questions only if we haven't already posted follow-ups this round
-        else if (!interview.followUpPostedForRound || interview.followUpPostedForRound < interview.round) {
-          const followUps = this.generateFollowUpQuestions(
-            interview.questions ?? [],
-            allResponses,
-          );
-
-          if (followUps.length > 0) {
-            interview.questions = [
-              ...(interview.questions ?? []),
-              ...followUps,
-            ];
-            interview.followUpPostedForRound = interview.round;
-
-            const followUpMessage = [
-              '**Follow-up Questions** (Round ' + interview.round + '/' + MAX_ROUNDS + ')',
-              '',
-              ...followUps.map((q, i) => `${i + 1}. ${q}`),
-              '',
-              '_Reply with your answers, or say **"done"** if you have nothing more to add._',
-            ].join('\n');
-
-            try {
-              await this.pmAdapter.addComment(
-                workflowRun.ticketId,
-                followUpMessage,
-              );
-            } catch (err) {
-              this.logger.warn(
-                `Failed to post follow-up questions: ${(err as Error).message}`,
-              );
-            }
-          } else {
-            // No more follow-ups to ask — go straight to spec synthesis
-            interview.spec = this.synthesizeSpec(
-              interview.questions ?? [],
-              allResponses,
-            );
-            interview.status = 'spec_ready';
-
-            const specMessage = [
-              '**Draft Specification**',
-              '',
-              interview.spec,
-              '',
-              '_Please review and reply with **"approve"** to proceed to the next phase, or provide additional feedback._',
-            ].join('\n');
-
-            try {
-              await this.pmAdapter.addComment(workflowRun.ticketId, specMessage);
-            } catch (err) {
-              this.logger.warn(
-                `Failed to post draft spec: ${(err as Error).message}`,
-              );
-            }
-          }
-        } else {
-          this.logger.log(`Skipping follow-up — already posted for round ${interview.round}`);
-        }
+        // Use AI to decide: do we have enough info now, or need more questions?
+        await this.evaluateAndRespond(workflowRun, interview, phaseData);
       }
 
+      // Persist state
       await this.prisma.workflowRun.update({
         where: { id: workflowRun.id },
-        data: {
-          phaseData: { ...phaseData, interview } as any,
-        },
+        data: { phaseData: { ...phaseData, interview } as any },
       });
-
-      // If spec was just approved, signal to orchestrator to move on
-      if (interview.status === 'approved') {
-        this.logger.log(`Interview approved for workflow ${workflowRun.id} — ready to advance`);
-        try {
-          await this.pmAdapter.addComment(
-            workflowRun.ticketId,
-            '**Interview Complete** — Specification approved. Moving to the Research phase.',
-          );
-        } catch (err) {
-          this.logger.warn(`Failed to post approval confirmation: ${(err as Error).message}`);
-        }
-      }
     }
   }
 
@@ -309,24 +214,18 @@ export class InterviewHandler implements PhaseHandler {
     const phaseData = workflowRun.phaseData as Record<string, any>;
     const interview = phaseData.interview ?? {};
 
-    const totalQuestions = interview.questions?.length ?? 0;
-    const responsesReceived = interview.responses?.length ?? 0;
-
     let progress = 0;
-    if (interview.status === 'approved' || interview.status === 'completed') {
-      progress = 100;
-    } else if (interview.status === 'spec_ready') {
-      progress = 90;
-    } else if (totalQuestions > 0) {
-      progress = Math.min((responsesReceived / totalQuestions) * 80, 80);
-    }
+    if (interview.status === 'approved' || interview.status === 'completed') progress = 100;
+    else if (interview.status === 'spec_ready') progress = 90;
+    else if (interview.responses?.length > 0) progress = 50;
+    else if (interview.status === 'active') progress = 20;
 
     return {
       phase: 'interview',
       progress,
       details: {
-        totalQuestions,
-        responsesReceived,
+        totalQuestions: interview.questions?.length ?? 0,
+        responsesReceived: interview.responses?.length ?? 0,
         conflictsDetected: interview.conflicts?.length ?? 0,
         status: interview.status ?? 'not_started',
         hasSpec: !!interview.spec,
@@ -340,173 +239,316 @@ export class InterviewHandler implements PhaseHandler {
     const phaseData = workflowRun.phaseData as Record<string, any>;
     const interview = phaseData.interview ?? {};
 
-    // Finalize spec if not already done
     if (!interview.spec && interview.responses?.length > 0) {
-      interview.spec = this.synthesizeSpec(
-        interview.questions ?? [],
-        interview.responses,
-      );
+      await this.synthesizeAndPostSpec(workflowRun, interview, phaseData);
     }
 
     interview.status = 'completed';
     interview.completedAt = new Date().toISOString();
 
-    // Post a summary comment to Jira with the finalized spec
     if (interview.spec) {
-      const summaryComment = [
-        '**Interview Complete - Final Specification**',
-        '',
-        interview.spec,
-        '',
-        '_This specification has been finalized and will be used for the next phases._',
-      ].join('\n');
-
       try {
-        await this.pmAdapter.addComment(workflowRun.ticketId, summaryComment);
+        await this.pmAdapter.addComment(workflowRun.ticketId, [
+          '**Interview Complete - Final Specification**',
+          '',
+          interview.spec,
+          '',
+          '_Moving to Research phase._',
+        ].join('\n'));
       } catch (err) {
-        this.logger.warn(
-          `Failed to post final spec comment: ${(err as Error).message}`,
-        );
-      }
-
-      // Update the Jira ticket description with the spec
-      try {
-        await this.pmAdapter.updateTicket(workflowRun.ticketId, {
-          description: interview.spec,
-        });
-      } catch (err) {
-        this.logger.warn(
-          `Failed to update ticket description: ${(err as Error).message}`,
-        );
+        this.logger.warn(`Failed to post final spec: ${(err as Error).message}`);
       }
     }
 
     await this.prisma.workflowRun.update({
       where: { id: workflowRun.id },
-      data: {
-        phaseData: { ...phaseData, interview },
-      },
+      data: { phaseData: { ...phaseData, interview } as any },
     });
   }
 
   // ---------------------------------------------------------------------------
-  // Private helpers
+  // AI-powered analysis
   // ---------------------------------------------------------------------------
 
-  private generateInitialQuestions(
+  /**
+   * Use AI to analyze if a ticket has enough information for a spec,
+   * or generate targeted questions for missing information.
+   */
+  private async analyzeTicketCompleteness(
     title: string,
     description: string,
     labels: string[],
-  ): string[] {
+    comments: Array<{ author: string; body: string }>,
+  ): Promise<{ isComplete: boolean; spec: string; questions: string[] }> {
+    const existingInfo = [
+      `Title: ${title}`,
+      `Description: ${description}`,
+      labels.length ? `Labels: ${labels.join(', ')}` : '',
+      ...comments.map(c => `Comment by ${c.author}: ${c.body}`),
+    ].filter(Boolean).join('\n\n');
+
+    const prompt = `You are analyzing a project ticket to determine if it has enough information to write a technical specification.
+
+Here is all available information about this ticket:
+
+${existingInfo}
+
+Analyze this carefully. A ticket has "enough information" if it clearly describes:
+- What needs to be done (the change/feature/fix)
+- Why it needs to be done (the motivation/problem)
+- What the expected outcome looks like
+
+It does NOT need to have every detail — the research and planning phases will figure out the technical approach. The interview phase just needs to understand the WHAT and WHY.
+
+Respond with EXACTLY one of these two JSON formats:
+
+If the ticket has enough information:
+{"isComplete": true, "spec": "A clear specification summarizing the requirements based on the ticket information. Include: ## Summary, ## Requirements, ## Acceptance Criteria (inferred from context), ## Scope"}
+
+If the ticket needs more information:
+{"isComplete": false, "questions": ["Only ask questions about genuinely missing information. Be specific. Max 3 questions."]}
+
+Respond with ONLY the JSON, no other text.`;
+
+    try {
+      const agent = await this.codingAgent.spawn({
+        prompt,
+        workingDirectory: process.cwd(),
+        timeout: 60000,
+      });
+
+      const output = agent.output ?? '';
+
+      // Parse JSON from the response
+      const jsonMatch = output.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const result = JSON.parse(jsonMatch[0]);
+        if (result.isComplete && result.spec) {
+          return { isComplete: true, spec: result.spec, questions: [] };
+        }
+        if (!result.isComplete && result.questions?.length) {
+          return { isComplete: false, spec: '', questions: result.questions };
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`AI analysis failed, falling back to heuristic: ${(err as Error).message}`);
+    }
+
+    // Fallback: simple heuristic if AI fails
+    return this.heuristicAnalysis(title, description, labels);
+  }
+
+  /**
+   * After receiving a response, use AI to decide if we have enough info or need more.
+   */
+  private async evaluateAndRespond(
+    workflowRun: WorkflowRun,
+    interview: Record<string, any>,
+    phaseData: Record<string, any>,
+  ): Promise<void> {
+    const allInfo = [
+      `Ticket: ${interview.ticketId}`,
+      `Questions asked: ${(interview.questions ?? []).join('; ')}`,
+      `Responses:`,
+      ...(interview.responses ?? []).map((r: any) => `  ${r.author}: ${r.content}`),
+    ].join('\n');
+
+    const prompt = `You are evaluating whether an interview for a coding task has gathered enough information.
+
+Here is the conversation so far:
+
+${allInfo}
+
+Do we have enough information to write a technical specification? Consider:
+- Is the WHAT (what needs to be done) clear?
+- Is the WHY (motivation) clear?
+- Is the expected outcome described?
+
+Respond with EXACTLY one of these JSON formats:
+
+If enough info: {"ready": true, "spec": "A clear specification. Include: ## Summary, ## Requirements, ## Acceptance Criteria, ## Scope"}
+If need more info: {"ready": false, "questions": ["1-2 specific questions about what's still unclear. Don't repeat questions already asked."]}
+
+Respond with ONLY the JSON.`;
+
+    try {
+      const agent = await this.codingAgent.spawn({
+        prompt,
+        workingDirectory: process.cwd(),
+        timeout: 60000,
+      });
+
+      const output = agent.output ?? '';
+      const jsonMatch = output.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const result = JSON.parse(jsonMatch[0]);
+
+        if (result.ready && result.spec) {
+          interview.spec = result.spec;
+          interview.status = 'spec_ready';
+
+          try {
+            await this.pmAdapter.addComment(workflowRun.ticketId, [
+              '**Draft Specification**',
+              '',
+              result.spec,
+              '',
+              '_Please review and reply with **"approve"** to proceed, or provide feedback._',
+            ].join('\n'));
+          } catch (err) {
+            this.logger.warn(`Failed to post spec: ${(err as Error).message}`);
+          }
+          return;
+        }
+
+        if (!result.ready && result.questions?.length) {
+          // Only post if we haven't already posted these exact questions
+          const newQuestions = result.questions.filter(
+            (q: string) => !(interview.questions ?? []).includes(q),
+          );
+
+          if (newQuestions.length > 0) {
+            interview.questions = [...(interview.questions ?? []), ...newQuestions];
+
+            try {
+              await this.pmAdapter.addComment(workflowRun.ticketId, [
+                '**Follow-up Questions**',
+                '',
+                ...newQuestions.map((q: string, i: number) => `${i + 1}. ${q}`),
+                '',
+                '_Reply with your answers, or say **"done"** if you have nothing more to add._',
+              ].join('\n'));
+            } catch (err) {
+              this.logger.warn(`Failed to post follow-ups: ${(err as Error).message}`);
+            }
+          }
+          return;
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`AI evaluation failed: ${(err as Error).message}`);
+    }
+
+    // If AI fails or we've been going back and forth, just synthesize
+    if ((interview.responses?.length ?? 0) >= 3) {
+      await this.synthesizeAndPostSpec(workflowRun, interview, phaseData);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
+
+  private async markApproved(workflowRun: WorkflowRun, approver: string): Promise<void> {
+    const phaseData = workflowRun.phaseData as Record<string, any>;
+    const interview = phaseData.interview ?? {};
+
+    interview.status = 'approved';
+    interview.approvedBy = approver;
+    interview.approvedAt = new Date().toISOString();
+
+    await this.prisma.workflowRun.update({
+      where: { id: workflowRun.id },
+      data: { phaseData: { ...phaseData, interview } as any },
+    });
+
+    this.logger.log(`Interview approved for workflow ${workflowRun.id}`);
+
+    try {
+      await this.pmAdapter.addComment(
+        workflowRun.ticketId,
+        '**Interview Complete** — Specification approved. Moving to the Research phase.',
+      );
+    } catch (err) {
+      this.logger.warn(`Failed to post approval confirmation: ${(err as Error).message}`);
+    }
+  }
+
+  private async synthesizeAndPostSpec(
+    workflowRun: WorkflowRun,
+    interview: Record<string, any>,
+    phaseData: Record<string, any>,
+  ): Promise<void> {
+    // Use AI to synthesize the spec from all gathered info
+    const allInfo = [
+      `Ticket ID: ${interview.ticketId}`,
+      ...(interview.responses ?? []).map((r: any) => `${r.author}: ${r.content}`),
+    ].join('\n');
+
+    let spec = '';
+    try {
+      const agent = await this.codingAgent.spawn({
+        prompt: `Synthesize a clear technical specification from the following interview responses. Include: ## Summary, ## Requirements, ## Acceptance Criteria, ## Scope\n\n${allInfo}`,
+        workingDirectory: process.cwd(),
+        timeout: 60000,
+      });
+      spec = agent.output ?? '';
+    } catch (err) {
+      this.logger.warn(`AI spec synthesis failed, using basic format: ${(err as Error).message}`);
+      spec = this.basicSpecSynthesis(interview);
+    }
+
+    interview.spec = spec;
+    interview.status = 'spec_ready';
+
+    try {
+      await this.pmAdapter.addComment(workflowRun.ticketId, [
+        '**Draft Specification**',
+        '',
+        spec,
+        '',
+        '_Please review and reply with **"approve"** to proceed, or provide feedback._',
+      ].join('\n'));
+    } catch (err) {
+      this.logger.warn(`Failed to post spec: ${(err as Error).message}`);
+    }
+
+    await this.prisma.workflowRun.update({
+      where: { id: workflowRun.id },
+      data: { phaseData: { ...phaseData, interview } as any },
+    });
+  }
+
+  private basicSpecSynthesis(interview: Record<string, any>): string {
+    const responses = interview.responses ?? [];
+    return [
+      '# Specification',
+      '',
+      '## Requirements',
+      ...responses.map((r: any) => `- ${r.content}`),
+      '',
+      '## Questions Asked',
+      ...(interview.questions ?? []).map((q: string) => `- ${q}`),
+    ].join('\n');
+  }
+
+  private heuristicAnalysis(
+    title: string,
+    description: string,
+    labels: string[],
+  ): { isComplete: boolean; spec: string; questions: string[] } {
+    const hasDescription = description && description.length > 100;
+    const hasAcceptanceCriteria = description?.toLowerCase().includes('acceptance criteria')
+      || description?.toLowerCase().includes('expected');
+
+    if (hasDescription && hasAcceptanceCriteria) {
+      return {
+        isComplete: true,
+        spec: `# Specification\n\n## Summary\n${title}\n\n## Requirements\n${description}`,
+        questions: [],
+      };
+    }
+
     const questions: string[] = [];
-
-    questions.push('What is the desired outcome of this change?');
-
-    if (!description || description.length < 50) {
-      questions.push(
-        'Can you provide a more detailed description of what needs to be built?',
-      );
+    if (!hasDescription) {
+      questions.push('Can you provide more details about what needs to be done and why?');
     }
-
-    questions.push('Are there any constraints, deadlines, or dependencies?');
-    questions.push('Who are the stakeholders that should review this work?');
-
-    if (!description?.toLowerCase().includes('acceptance criteria')) {
-      questions.push('What are the acceptance criteria for this change?');
+    if (!hasAcceptanceCriteria) {
+      questions.push('What does "done" look like? What are the acceptance criteria?');
     }
-
-    if (labels.length === 0) {
-      questions.push(
-        'What area of the system does this change affect (e.g., frontend, backend, infrastructure)?',
-      );
+    if (questions.length === 0) {
+      questions.push('Are there any constraints, dependencies, or edge cases to consider?');
     }
-
-    questions.push('Are there any related tickets or prior work to reference?');
-
-    return questions;
-  }
-
-  private generateFollowUpQuestions(
-    existingQuestions: string[],
-    responses: Array<{ author: string; content: string }>,
-  ): string[] {
-    const followUps: string[] = [];
-    const allContent = responses.map((r) => r.content.toLowerCase()).join(' ');
-
-    // If no one mentioned testing, ask about it
-    if (
-      !allContent.includes('test') &&
-      !allContent.includes('qa') &&
-      !allContent.includes('quality')
-    ) {
-      followUps.push(
-        'Are there specific testing requirements or quality gates for this change?',
-      );
-    }
-
-    // If no one mentioned rollback or risk
-    if (
-      !allContent.includes('rollback') &&
-      !allContent.includes('risk') &&
-      !allContent.includes('revert')
-    ) {
-      followUps.push(
-        'What is the rollback plan if this change causes issues in production?',
-      );
-    }
-
-    // If responses mention multiple systems, ask about integration
-    const systemKeywords = [
-      'api',
-      'database',
-      'frontend',
-      'backend',
-      'service',
-      'queue',
-      'cache',
-    ];
-    const mentionedSystems = systemKeywords.filter((kw) =>
-      allContent.includes(kw),
-    );
-    if (mentionedSystems.length > 1) {
-      followUps.push(
-        `Multiple systems were mentioned (${mentionedSystems.join(', ')}). Are there specific integration points we should be careful about?`,
-      );
-    }
-
-    return followUps;
-  }
-
-  private synthesizeSpec(
-    questions: string[],
-    responses: Array<{ author: string; content: string }>,
-  ): string {
-    const sections: string[] = [];
-
-    sections.push('# Specification');
-    sections.push('');
-
-    sections.push('## Requirements');
-    sections.push('');
-    for (const response of responses) {
-      sections.push(`- (${response.author}): ${response.content}`);
-    }
-    sections.push('');
-
-    sections.push('## Questions Asked');
-    sections.push('');
-    for (const q of questions) {
-      sections.push(`- ${q}`);
-    }
-    sections.push('');
-
-    sections.push('## Stakeholders');
-    sections.push('');
-    const authors = [...new Set(responses.map((r) => r.author))];
-    for (const author of authors) {
-      sections.push(`- ${author}`);
-    }
-
-    return sections.join('\n');
+    return { isComplete: false, spec: '', questions };
   }
 }
