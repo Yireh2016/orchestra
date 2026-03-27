@@ -327,77 +327,130 @@ export class ExecutionHandler implements PhaseHandler {
       }
     }
 
-    if (event.type === 'manual_gates_passed') {
+    // /orchestra command — AI reads the full PR comment thread and decides what to do
+    if (event.type === 'orchestra_command') {
       const taskId = event.payload.taskId as string;
-      this.logger.log(`Manual gates passed for task ${taskId}`);
-
-      await this.prisma.task.update({
-        where: { id: taskId },
-        data: { status: 'PASSED' },
-      });
-
-      // Check if all tasks are now fully done
-      const allTasks = await this.prisma.task.findMany({
-        where: { workflowRunId: workflowRun.id },
-      });
-      const allTasksPassed = allTasks.every((t) => t.status === 'PASSED');
-
-      if (allTasksPassed) {
-        this.logger.log(`All ${allTasks.length} tasks passed (including manual gates) — execution phase complete`);
-        execution.status = 'completed';
-        execution.completedAt = new Date().toISOString();
-        execution.allTasksPassed = true;
-        execution.readyForCompletion = true;
-
-        await this.prisma.workflowRun.update({
-          where: { id: workflowRun.id },
-          data: {
-            phaseData: { ...phaseData, execution },
-          },
-        });
-      }
-    }
-
-    if (event.type === 'manual_gate_fix_requested') {
-      const taskId = event.payload.taskId as string;
-      const fixDescription = event.payload.fixDescription as string;
+      const commentThread = event.payload.commentThread as Array<{ author: string; body: string; createdAt: any }>;
       const task = await this.prisma.task.findUnique({ where: { id: taskId } });
+      if (!task) return;
 
-      if (task && task.status === 'AWAITING_MANUAL_GATES') {
-        this.logger.log(`Fix requested for task ${taskId}: ${fixDescription}`);
+      const taskRepo = this.resolveTaskRepo(task.ticketId, phaseData, workflowRun);
+      const planTasks = (phaseData.planning?.tasks ?? []) as any[];
+      const planTask = planTasks.find((t: any) => t.id === task.ticketId);
+      const projectContext = this.getProjectContext(workflowRun);
 
-        // Set task back to PENDING and re-queue with fix context
-        await this.prisma.task.update({
-          where: { id: taskId },
-          data: { status: 'PENDING' },
+      // Build the conversation for the AI
+      const threadText = commentThread
+        .map(c => `[${c.author}]: ${c.body}`)
+        .join('\n\n');
+
+      const manualGates = (task.gateResults as any)?.manualGates ?? planTask?.manualGates ?? [];
+      const manualGateList = manualGates.map((g: any) => `- ${g.name}: ${g.description ?? ''}`).join('\n');
+
+      const decisionPrompt = `${projectContext}You are managing a pull request for a coding task. A human has tagged /orchestra in the PR comments to communicate with you.
+
+## Task
+Title: ${planTask?.title ?? task.ticketId}
+Branch: ${task.branch}
+PR: ${task.prUrl}
+
+## Manual Validation Gates
+${manualGateList || 'No specific manual gates defined.'}
+
+## PR Comment Thread (in order)
+${threadText}
+
+## Your Decision
+Read the conversation above carefully. The human is either:
+A) Confirming that manual validation passed (everything looks good)
+B) Reporting issues that need to be fixed
+
+Respond with ONLY one of these JSON formats:
+
+If gates passed (human confirmed things work):
+{"decision": "gates_passed", "summary": "Brief summary of what was validated"}
+
+If fixes needed (human reported issues):
+{"decision": "fix_needed", "summary": "What needs to be fixed", "fixInstructions": "Detailed instructions for the coding agent"}
+
+Respond with ONLY the JSON.`;
+
+      this.logger.log(`Processing /orchestra command for task ${taskId} — sending ${commentThread.length} comments to AI`);
+
+      try {
+        const agent = await this.codingAgent.spawn({
+          prompt: decisionPrompt,
+          workingDirectory: process.cwd(),
+          timeout: 60000,
         });
 
-        const taskRepo = this.resolveTaskRepo(task.ticketId, phaseData, workflowRun);
-        const planTasks = (phaseData.planning?.tasks ?? []) as any[];
-        const planTask = planTasks.find((t: any) => t.id === task.ticketId);
-
-        const fixPrompt = `A reviewer found issues during manual validation of your PR on branch ${task.branch}.\n\nFix requested: ${fixDescription}\n\nPlease fix the issues. This is a fix request from manual gate review.`;
-
+        const output = agent.output ?? '';
+        let decision: any = null;
         try {
-          await this.taskQueue.enqueue({
-            taskId: task.id,
-            workflowRunId: workflowRun.id,
-            prompt: fixPrompt,
-            workingDirectory: '.',
-            repoUrl: taskRepo.url,
-            branch: task.branch,
-            baseBranch: taskRepo.defaultBranch,
-            taskDefinition: {
-              title: planTask?.title ?? task.ticketId,
-              description: fixPrompt,
-              acceptanceCriteria: planTask?.acceptanceCriteria ?? [],
-              gates: planTask?.automatedGates ?? planTask?.gates ?? [],
-            },
-            automatedGates: planTask?.automatedGates ?? planTask?.gates ?? [],
-          });
-        } catch (err) {
-          this.logger.warn(`Failed to enqueue fix for task ${taskId}: ${(err as Error).message}`);
+          const jsonMatch = output.match(/\{[\s\S]*\}/);
+          if (jsonMatch) decision = JSON.parse(jsonMatch[0]);
+        } catch { /* not JSON */ }
+
+        if (decision?.decision === 'gates_passed') {
+          this.logger.log(`AI decided: gates passed for task ${taskId} — "${decision.summary}"`);
+
+          await this.prisma.task.update({ where: { id: taskId }, data: { status: 'PASSED' } });
+
+          // Post confirmation on PR
+          try {
+            const repoSlug = taskRepo.slug;
+            const prMatch = task.prUrl?.match(/\/pull\/(\d+)/);
+            const prNum = prMatch ? parseInt(prMatch[1], 10) : 0;
+            if (prNum) {
+              await this.codeHost.addPRComment(repoSlug, prNum,
+                `**Orchestra** — Manual validation confirmed. ${decision.summary}\n\nMoving forward.`);
+            }
+          } catch { /* ignore */ }
+
+          // Check if all tasks done
+          const allTasks = await this.prisma.task.findMany({ where: { workflowRunId: workflowRun.id } });
+          if (allTasks.every(t => t.status === 'PASSED')) {
+            this.logger.log(`All tasks passed — execution phase complete`);
+            execution.status = 'completed';
+            execution.allTasksPassed = true;
+            execution.completedAt = new Date().toISOString();
+            await this.prisma.workflowRun.update({
+              where: { id: workflowRun.id },
+              data: { phaseData: { ...phaseData, execution } as any },
+            });
+          }
+
+        } else {
+          // Fix needed
+          const fixInstructions = decision?.fixInstructions ?? decision?.summary ?? output.substring(0, 500);
+          this.logger.log(`AI decided: fix needed for task ${taskId} — "${fixInstructions.substring(0, 100)}..."`);
+
+          await this.prisma.task.update({ where: { id: taskId }, data: { status: 'PENDING' } });
+
+          const fixPrompt = `${projectContext}A reviewer found issues during manual validation of your PR on branch ${task.branch}.\n\nFix instructions:\n${fixInstructions}\n\nPlease fix the issues in the cloned repository. Do NOT commit or push.`;
+
+          try {
+            await this.taskQueue.enqueue({
+              taskId: task.id,
+              workflowRunId: workflowRun.id,
+              prompt: fixPrompt,
+              workingDirectory: '.',
+              repoUrl: taskRepo.url,
+              branch: task.branch,
+              baseBranch: taskRepo.defaultBranch,
+              taskDefinition: {
+                title: planTask?.title ?? task.ticketId,
+                description: fixInstructions,
+                acceptanceCriteria: planTask?.acceptanceCriteria ?? [],
+              },
+              automatedGates: planTask?.automatedGates ?? [],
+            });
+          } catch (err) {
+            this.logger.warn(`Failed to enqueue fix for task ${taskId}: ${(err as Error).message}`);
+          }
         }
+      } catch (err) {
+        this.logger.warn(`Failed to process /orchestra command for task ${taskId}: ${(err as Error).message}`);
       }
     }
 

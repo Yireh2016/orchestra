@@ -367,51 +367,42 @@ export class PollingService implements OnModuleInit, OnModuleDestroy {
               newComments[newComments.length - 1].id,
             );
 
-            // Check for /orchestra commands on tasks awaiting manual gates
+            // Check for /orchestra tag on tasks awaiting manual gates
+            // When detected, send the full comment history to the coding agent
+            // and let it decide what to do (fix code or mark gates as passed)
             if (task.status === 'AWAITING_MANUAL_GATES') {
-              for (const comment of newComments) {
-                if (this.isOrchestraComment(comment.body)) continue;
-                if (!comment.body.includes('/orchestra')) continue;
+              const hasOrchestraTag = newComments.some(
+                c => !this.isOrchestraComment(c.body) && c.body.includes('/orchestra'),
+              );
 
-                // Extract the message after /orchestra
-                const orchestraMatch = comment.body.match(/\/orchestra\s+([\s\S]*)/);
-                if (!orchestraMatch) continue;
-                const message = orchestraMatch[1].trim();
+              if (hasOrchestraTag) {
+                this.logger.log(`/orchestra detected on ${task.prUrl} — sending full thread to coding agent`);
 
-                // Interpret intent from natural language
-                const intent = this.interpretOrchestraIntent(message);
-                this.logger.log(`/orchestra command on ${task.prUrl} by ${comment.author}: "${message}" → intent: ${intent.type}`);
+                // Fetch ALL PR comments to give full context
+                const allComments = reviewComments.map(c => ({
+                  author: c.author,
+                  body: c.body,
+                  createdAt: c.createdAt,
+                }));
 
-                if (intent.type === 'gates_passed') {
-                  await this.orchestrator.handleEvent(run.id, {
-                    type: 'manual_gates_passed',
-                    source: 'github-polling',
-                    payload: { taskId: task.id, prUrl: task.prUrl, approvedBy: comment.author, message },
-                    timestamp: new Date(),
-                  });
-                  this.eventBus.emit({
-                    type: 'poll.event_detected',
-                    workflowRunId: run.id,
-                    payload: { provider: 'github', eventType: 'manual_gates_passed', prUrl: task.prUrl },
-                  });
-                } else if (intent.type === 'fix_requested') {
-                  await this.orchestrator.handleEvent(run.id, {
-                    type: 'manual_gate_fix_requested',
-                    source: 'github-polling',
-                    payload: {
-                      taskId: task.id,
-                      prUrl: task.prUrl,
-                      fixDescription: message,
-                      requestedBy: comment.author,
-                    },
-                    timestamp: new Date(),
-                  });
-                  this.eventBus.emit({
-                    type: 'poll.event_detected',
-                    workflowRunId: run.id,
-                    payload: { provider: 'github', eventType: 'manual_gate_fix_requested', prUrl: task.prUrl },
-                  });
-                }
+                await this.orchestrator.handleEvent(run.id, {
+                  type: 'orchestra_command',
+                  source: 'github-polling',
+                  payload: {
+                    taskId: task.id,
+                    prUrl: task.prUrl,
+                    prNumber,
+                    repo,
+                    commentThread: allComments,
+                  },
+                  timestamp: new Date(),
+                });
+
+                this.eventBus.emit({
+                  type: 'poll.event_detected',
+                  workflowRunId: run.id,
+                  payload: { provider: 'github', eventType: 'orchestra_command', prUrl: task.prUrl },
+                });
               }
             }
 
@@ -448,38 +439,6 @@ export class PollingService implements OnModuleInit, OnModuleDestroy {
   }
 
   // ---- Helpers ----
-
-  /**
-   * Interpret natural language intent from /orchestra commands.
-   * People can say things like:
-   *   "/orchestra hey all looks good" → gates_passed
-   *   "/orchestra the validation worked" → gates_passed
-   *   "/orchestra found an issue with encryption, here's the log..." → fix_requested
-   *   "/orchestra lgtm" → gates_passed
-   */
-  private interpretOrchestraIntent(message: string): { type: 'gates_passed' | 'fix_requested' } {
-    const lower = message.toLowerCase();
-
-    // Positive signals — human is saying things look good
-    const positivePatterns = [
-      /\b(looks? good|lgtm|all good|works|working|passed|validated|verified|confirmed|approved|ship it|good to go|all set|no issues?|everything.*(fine|good|ok|correct)|gates?.*(pass|ok|good))\b/,
-      /\b(thumbs up|nice|perfect|great|awesome|done|ready|go ahead|proceed)\b/,
-    ];
-
-    // Negative signals — human found issues
-    const negativePatterns = [
-      /\b(issue|bug|error|fail|broken|wrong|fix|problem|not working|doesn'?t work|crash|regression|missing|incorrect|found.*(issue|bug|problem))\b/,
-      /\b(please.*(fix|check|look|update)|needs?.*(fix|change|update)|still.*(fail|broken|wrong))\b/,
-    ];
-
-    const isPositive = positivePatterns.some(p => p.test(lower));
-    const isNegative = negativePatterns.some(p => p.test(lower));
-
-    // If both or neither match, lean towards fix_requested for safety
-    // (better to ask for a fix than to auto-approve prematurely)
-    if (isPositive && !isNegative) return { type: 'gates_passed' };
-    return { type: 'fix_requested' };
-  }
 
   /**
    * Detect comments posted by Orchestra to avoid feedback loops.
