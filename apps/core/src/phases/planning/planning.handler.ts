@@ -268,6 +268,29 @@ Respond with ONLY the JSON.`;
         } catch (err) {
           this.logger.warn(`Failed to post approval: ${(err as Error).message}`);
         }
+      } else {
+        // Human provided feedback — regenerate the plan incorporating it
+        this.logger.log(`Plan feedback received for workflow ${workflowRun.id}: "${commentText.substring(0, 100)}..."`);
+
+        try {
+          await this.pmAdapter.addComment(
+            workflowRun.ticketId,
+            '**Plan Revision** — Regenerating plan based on your feedback...',
+          );
+        } catch { /* ignore */ }
+
+        // Regenerate by calling start() again with feedback context
+        planning.feedback = planning.feedback ?? [];
+        planning.feedback.push({ author: (rawComment as any)?.author ?? 'human', text: commentText });
+        planning.status = 'regenerating';
+
+        await this.prisma.workflowRun.update({
+          where: { id: workflowRun.id },
+          data: { phaseData: { ...phaseData, planning } as any },
+        });
+
+        // Re-run planning with feedback
+        await this.regeneratePlan(workflowRun, phaseData, commentText);
       }
     }
 
@@ -280,6 +303,162 @@ Respond with ONLY the JSON.`;
         where: { id: workflowRun.id },
         data: { phaseData: { ...phaseData, planning } as any },
       });
+    }
+  }
+
+  /**
+   * Regenerate the plan incorporating human feedback.
+   */
+  private async regeneratePlan(
+    workflowRun: WorkflowRun,
+    phaseData: Record<string, any>,
+    feedback: string,
+  ): Promise<void> {
+    const spec = phaseData.interview?.spec ?? '';
+    const research = phaseData.research?.artifacts?.research ?? '';
+    const previousPlan = phaseData.planning;
+    const projectContext = this.getProjectContext(workflowRun);
+
+    const projectCtx = phaseData._projectContext;
+    const repoList = (projectCtx?.repositories as any[] ?? [])
+      .map((r: any) => `- ${r.url} (branch: ${r.defaultBranch || 'main'})`)
+      .join('\n');
+
+    const previousPlanSummary = previousPlan?.tasks?.length
+      ? `## Previous Plan (rejected)\n${JSON.stringify(previousPlan.tasks, null, 2)}`
+      : '';
+
+    const prompt = `${projectContext}Regenerate the implementation plan based on human feedback.
+
+## Specification
+${spec}
+
+## Research Findings
+${research || 'No research findings available.'}
+
+## Available Repositories
+${repoList || 'No repositories configured.'}
+
+${previousPlanSummary}
+
+## Human Feedback
+${feedback}
+
+IMPORTANT: Address the feedback above. The previous plan was rejected because of the issues described.
+
+CRITICAL: Every task MUST have gates that verify its acceptance criteria:
+- automatedGates: commands that can be run in the repo to verify the task is done (tests, lint, build, type-check). These MUST pass before a PR is created.
+- manualGates: checks that require human verification (UI testing, performance, etc.). These will be posted as a checklist on the PR for human validation.
+- If the repo has a test runner, include it.
+- Investigation tasks (repo: null) don't need gates.
+
+If the entire plan is small enough to be done in a single PR, create just one task.
+
+Respond with ONLY a JSON object in this exact format:
+{
+  "overview": "Brief description of the plan",
+  "tasks": [
+    {
+      "id": "task-1",
+      "title": "Short task title",
+      "description": "What this task does",
+      "repo": "https://github.com/org/repo",
+      "dependsOn": [],
+      "acceptanceCriteria": ["Criteria 1"],
+      "automatedGates": [{"name": "Tests pass", "command": "npm test"}],
+      "manualGates": [{"name": "Feature works", "description": "Verify in browser"}],
+      "branch": "task-slug"
+    }
+  ]
+}
+
+Respond with ONLY the JSON.`;
+
+    // Clone repos for context
+    let clonedDir: string | null = null;
+    let workingDirectory = process.cwd();
+    try {
+      clonedDir = await this.repoCloner.cloneAllRepos(phaseData);
+      if (clonedDir) workingDirectory = clonedDir;
+    } catch { /* use cwd */ }
+
+    try {
+      const agent = await this.codingAgent.spawn({
+        prompt,
+        workingDirectory,
+        timeout: 120000,
+      });
+
+      const output = agent.output ?? '';
+      this.logger.log(`Regenerated plan: ${output.length} bytes`);
+
+      const jsonMatch = output.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const plan = JSON.parse(jsonMatch[0]);
+
+        if (plan.tasks?.length > 0) {
+          const taskNodes: TaskNode[] = plan.tasks.map((t: any) => ({
+            id: t.id, name: t.title, dependsOn: t.dependsOn ?? [],
+          }));
+
+          let dag = null;
+          let executionGroups: string[][] = [];
+          try {
+            dag = this.dagBuilder.buildDag(taskNodes);
+            executionGroups = this.dagBuilder.computeExecutionGroups(dag);
+          } catch { /* ignore dag errors */ }
+
+          const freshRun = await this.prisma.workflowRun.findUniqueOrThrow({ where: { id: workflowRun.id } });
+          const freshPd = (freshRun.phaseData ?? {}) as Record<string, any>;
+
+          freshPd.planning = {
+            ...freshPd.planning,
+            status: 'awaiting_approval',
+            overview: plan.overview,
+            tasks: plan.tasks,
+            dag,
+            executionGroups,
+            planPostedAt: new Date().toISOString(),
+            revision: (freshPd.planning?.revision ?? 0) + 1,
+          };
+
+          await this.prisma.workflowRun.update({
+            where: { id: workflowRun.id },
+            data: { phaseData: freshPd as any },
+          });
+
+          // Post revised plan to Jira
+          const planSummary = [
+            `**Revised Implementation Plan** (revision ${freshPd.planning.revision})`,
+            '',
+            `**Overview:** ${plan.overview}`,
+            '',
+            `**Tasks (${plan.tasks.length}):**`,
+            ...plan.tasks.map((t: any, i: number) => {
+              const autoGates = (t.automatedGates ?? []).map((g: any) => g.name).join(', ');
+              const manualGates = (t.manualGates ?? []).map((g: any) => g.name).join(', ');
+              return `${i + 1}. **${t.title}** — ${t.description}\n   Auto gates: ${autoGates || 'none'} | Manual gates: ${manualGates || 'none'}`;
+            }),
+            '',
+            '_Reply with **"approve"** to start execution, or provide more feedback._',
+          ].join('\n');
+
+          try {
+            const planComment = await this.pmAdapter.addComment(workflowRun.ticketId, planSummary);
+            freshPd.planning.planCommentId = planComment.id;
+            await this.prisma.workflowRun.update({
+              where: { id: workflowRun.id },
+              data: { phaseData: freshPd as any },
+            });
+          } catch (err) {
+            this.logger.warn(`Failed to post revised plan: ${(err as Error).message}`);
+          }
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`Plan regeneration failed: ${(err as Error).message}`);
+    } finally {
+      if (clonedDir) this.repoCloner.cleanupClone(clonedDir);
     }
   }
 
