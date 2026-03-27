@@ -371,51 +371,45 @@ export class PollingService implements OnModuleInit, OnModuleDestroy {
             if (task.status === 'AWAITING_MANUAL_GATES') {
               for (const comment of newComments) {
                 if (this.isOrchestraComment(comment.body)) continue;
+                if (!comment.body.includes('/orchestra')) continue;
 
-                if (comment.body.includes('/orchestra gates-passed')) {
-                  this.logger.log(`Manual gates approved via PR comment on ${task.prUrl}`);
+                // Extract the message after /orchestra
+                const orchestraMatch = comment.body.match(/\/orchestra\s+([\s\S]*)/);
+                if (!orchestraMatch) continue;
+                const message = orchestraMatch[1].trim();
+
+                // Interpret intent from natural language
+                const intent = this.interpretOrchestraIntent(message);
+                this.logger.log(`/orchestra command on ${task.prUrl} by ${comment.author}: "${message}" → intent: ${intent.type}`);
+
+                if (intent.type === 'gates_passed') {
                   await this.orchestrator.handleEvent(run.id, {
                     type: 'manual_gates_passed',
                     source: 'github-polling',
-                    payload: { taskId: task.id, prUrl: task.prUrl, approvedBy: comment.author },
+                    payload: { taskId: task.id, prUrl: task.prUrl, approvedBy: comment.author, message },
                     timestamp: new Date(),
                   });
-
                   this.eventBus.emit({
                     type: 'poll.event_detected',
                     workflowRunId: run.id,
-                    payload: {
-                      provider: 'github',
-                      eventType: 'manual_gates_passed',
-                      prUrl: task.prUrl,
-                    },
+                    payload: { provider: 'github', eventType: 'manual_gates_passed', prUrl: task.prUrl },
                   });
-                }
-
-                const fixMatch = comment.body.match(/\/orchestra fix:\s*(.+)/);
-                if (fixMatch) {
-                  const fixDescription = fixMatch[1].trim();
-                  this.logger.log(`Fix requested via PR comment on ${task.prUrl}: ${fixDescription}`);
+                } else if (intent.type === 'fix_requested') {
                   await this.orchestrator.handleEvent(run.id, {
                     type: 'manual_gate_fix_requested',
                     source: 'github-polling',
                     payload: {
                       taskId: task.id,
                       prUrl: task.prUrl,
-                      fixDescription,
+                      fixDescription: message,
                       requestedBy: comment.author,
                     },
                     timestamp: new Date(),
                   });
-
                   this.eventBus.emit({
                     type: 'poll.event_detected',
                     workflowRunId: run.id,
-                    payload: {
-                      provider: 'github',
-                      eventType: 'manual_gate_fix_requested',
-                      prUrl: task.prUrl,
-                    },
+                    payload: { provider: 'github', eventType: 'manual_gate_fix_requested', prUrl: task.prUrl },
                   });
                 }
               }
@@ -453,7 +447,39 @@ export class PollingService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  // ---- Deduplication helpers ----
+  // ---- Helpers ----
+
+  /**
+   * Interpret natural language intent from /orchestra commands.
+   * People can say things like:
+   *   "/orchestra hey all looks good" → gates_passed
+   *   "/orchestra the validation worked" → gates_passed
+   *   "/orchestra found an issue with encryption, here's the log..." → fix_requested
+   *   "/orchestra lgtm" → gates_passed
+   */
+  private interpretOrchestraIntent(message: string): { type: 'gates_passed' | 'fix_requested' } {
+    const lower = message.toLowerCase();
+
+    // Positive signals — human is saying things look good
+    const positivePatterns = [
+      /\b(looks? good|lgtm|all good|works|working|passed|validated|verified|confirmed|approved|ship it|good to go|all set|no issues?|everything.*(fine|good|ok|correct)|gates?.*(pass|ok|good))\b/,
+      /\b(thumbs up|nice|perfect|great|awesome|done|ready|go ahead|proceed)\b/,
+    ];
+
+    // Negative signals — human found issues
+    const negativePatterns = [
+      /\b(issue|bug|error|fail|broken|wrong|fix|problem|not working|doesn'?t work|crash|regression|missing|incorrect|found.*(issue|bug|problem))\b/,
+      /\b(please.*(fix|check|look|update)|needs?.*(fix|change|update)|still.*(fail|broken|wrong))\b/,
+    ];
+
+    const isPositive = positivePatterns.some(p => p.test(lower));
+    const isNegative = negativePatterns.some(p => p.test(lower));
+
+    // If both or neither match, lean towards fix_requested for safety
+    // (better to ask for a fix than to auto-approve prematurely)
+    if (isPositive && !isNegative) return { type: 'gates_passed' };
+    return { type: 'fix_requested' };
+  }
 
   /**
    * Detect comments posted by Orchestra to avoid feedback loops.
