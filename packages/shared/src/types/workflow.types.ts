@@ -39,6 +39,8 @@ export enum TaskStatus {
   PASSED = 'passed',
   /** Task failed after exhausting retries. */
   FAILED = 'failed',
+  /** Automated gates passed; waiting for human to verify manual gates. */
+  AWAITING_MANUAL_GATES = 'awaiting_manual_gates',
 }
 
 /**

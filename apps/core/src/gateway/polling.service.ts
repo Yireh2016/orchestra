@@ -367,6 +367,60 @@ export class PollingService implements OnModuleInit, OnModuleDestroy {
               newComments[newComments.length - 1].id,
             );
 
+            // Check for /orchestra commands on tasks awaiting manual gates
+            if (task.status === 'AWAITING_MANUAL_GATES') {
+              for (const comment of newComments) {
+                if (this.isOrchestraComment(comment.body)) continue;
+
+                if (comment.body.includes('/orchestra gates-passed')) {
+                  this.logger.log(`Manual gates approved via PR comment on ${task.prUrl}`);
+                  await this.orchestrator.handleEvent(run.id, {
+                    type: 'manual_gates_passed',
+                    source: 'github-polling',
+                    payload: { taskId: task.id, prUrl: task.prUrl, approvedBy: comment.author },
+                    timestamp: new Date(),
+                  });
+
+                  this.eventBus.emit({
+                    type: 'poll.event_detected',
+                    workflowRunId: run.id,
+                    payload: {
+                      provider: 'github',
+                      eventType: 'manual_gates_passed',
+                      prUrl: task.prUrl,
+                    },
+                  });
+                }
+
+                const fixMatch = comment.body.match(/\/orchestra fix:\s*(.+)/);
+                if (fixMatch) {
+                  const fixDescription = fixMatch[1].trim();
+                  this.logger.log(`Fix requested via PR comment on ${task.prUrl}: ${fixDescription}`);
+                  await this.orchestrator.handleEvent(run.id, {
+                    type: 'manual_gate_fix_requested',
+                    source: 'github-polling',
+                    payload: {
+                      taskId: task.id,
+                      prUrl: task.prUrl,
+                      fixDescription,
+                      requestedBy: comment.author,
+                    },
+                    timestamp: new Date(),
+                  });
+
+                  this.eventBus.emit({
+                    type: 'poll.event_detected',
+                    workflowRunId: run.id,
+                    payload: {
+                      provider: 'github',
+                      eventType: 'manual_gate_fix_requested',
+                      prUrl: task.prUrl,
+                    },
+                  });
+                }
+              }
+            }
+
             // Only emit if there are human comments (not from our bot)
             const humanComments = newComments.filter(
               (c) => !this.isOrchestraComment(c.body),
@@ -495,6 +549,7 @@ export class PollingService implements OnModuleInit, OnModuleDestroy {
       '## Orchestra Re-Review',
       'Review phase completed.',
       '<!-- orchestra-bot -->',
+      '## Manual Validation Required',
     ];
     return orchestraPrefixes.some((prefix) => body.startsWith(prefix));
   }

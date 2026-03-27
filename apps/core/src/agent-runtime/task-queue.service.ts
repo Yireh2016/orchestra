@@ -22,6 +22,7 @@ export interface TaskJobData {
     acceptanceCriteria?: string[];
     gates?: { name: string; command: string }[];
   };
+  automatedGates?: { name: string; command: string }[];
   timeout?: number;
 }
 
@@ -181,6 +182,7 @@ export class TaskQueueService implements OnModuleInit {
         title: `Task ${taskId}`,
         description: prompt,
       },
+      automatedGates: job.data.automatedGates,
       callbackUrl: `${callbackBaseUrl}/agent-callback`,
       timeout: job.data.timeout || 600_000,
     };
@@ -221,26 +223,31 @@ export class TaskQueueService implements OnModuleInit {
       this.logger.warn(
         `Task ${taskId} (workflow ${workflowRunId}) failed after ${elapsed}ms — exit code ${result.exitCode}, output length: ${(result.output || '').length}`,
       );
+
+      // Store gate results if available
+      if (result.gateResults?.length) {
+        await this.prisma.task.update({
+          where: { id: taskId },
+          data: { gateResults: { results: result.gateResults, allGatesPassed: false } as any },
+        });
+      }
+
       await this.markTaskStatus(taskId, 'FAILED');
       await this.notifyCompletion(job.data, 'FAILED');
       return;
     }
 
-    // Run gate commands if defined
-    const gates = job.data.taskDefinition?.gates;
-    if (gates && gates.length > 0) {
-      const gatesPassed = await this.runGates(taskId, gates, workingDirectory);
-      if (!gatesPassed) {
-        this.logger.warn(`Task ${taskId} failed gate validation`);
-        await this.markTaskStatus(taskId, 'FAILED');
-        await this.notifyCompletion(job.data, 'FAILED');
-        return;
-      }
+    // Store gate results if available
+    if (result.gateResults?.length) {
+      await this.prisma.task.update({
+        where: { id: taskId },
+        data: { gateResults: { results: result.gateResults, allGatesPassed: result.allGatesPassed } as any },
+      });
     }
 
-    // Task succeeded
+    // Task succeeded — gates already ran and passed inside ContainerService
     const elapsed = Date.now() - startTime;
-    this.logger.log(`Task ${taskId} completed successfully in ${elapsed}ms (branchPushed: ${result.branchPushed ?? false})`);
+    this.logger.log(`Task ${taskId} completed successfully in ${elapsed}ms (branchPushed: ${result.branchPushed ?? false}, gatesPassed: ${result.allGatesPassed ?? 'n/a'})`);
     await this.markTaskStatus(taskId, 'PASSED');
     await this.evaluateDownstream(job.data);
     await this.notifyCompletion(job.data, 'PASSED', result.branchPushed);
@@ -302,7 +309,7 @@ export class TaskQueueService implements OnModuleInit {
 
   private async markTaskStatus(
     taskId: string,
-    status: 'PENDING' | 'QUEUED' | 'RUNNING' | 'PASSED' | 'FAILED',
+    status: 'PENDING' | 'QUEUED' | 'RUNNING' | 'PASSED' | 'FAILED' | 'AWAITING_MANUAL_GATES',
   ): Promise<void> {
     try {
       await this.prisma.task.update({

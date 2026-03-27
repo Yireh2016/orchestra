@@ -26,6 +26,7 @@ enum TaskStatus {
   RUNNING
   PASSED
   FAILED
+  AWAITING_MANUAL_GATES
 }
 
 enum IntegrationType {

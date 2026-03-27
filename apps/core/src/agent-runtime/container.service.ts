@@ -19,8 +19,16 @@ export interface RunTaskParams {
     acceptanceCriteria?: string[];
     gates?: { name: string; command: string }[];
   };
+  automatedGates?: { name: string; command: string }[];
   callbackUrl: string;
   timeout?: number;
+}
+
+export interface GateRunResult {
+  name: string;
+  passed: boolean;
+  output: string;
+  attempts: number;
 }
 
 export interface TaskRunResult {
@@ -28,6 +36,8 @@ export interface TaskRunResult {
   output: string;
   exitCode: number;
   branchPushed?: boolean;
+  gateResults?: GateRunResult[];
+  allGatesPassed?: boolean;
 }
 
 @Injectable()
@@ -152,7 +162,59 @@ export class ContainerService {
         }
       } catch { /* not JSON-wrapped */ }
 
-      // 6. Check if any files were changed
+      // 6. Run automated gates in the cloned repo (before commit/push)
+      let gateResults: GateRunResult[] = [];
+      let allGatesPassed = true;
+      const automatedGates = params.automatedGates ?? params.taskDefinition.gates ?? [];
+
+      if (automatedGates.length > 0) {
+        const MAX_GATE_RETRIES = 3;
+
+        for (let attempt = 1; attempt <= MAX_GATE_RETRIES; attempt++) {
+          gateResults = [];
+          allGatesPassed = true;
+
+          for (const gate of automatedGates) {
+            try {
+              const gateResult = await this.execShell(gate.command, { cwd: tmpDir });
+              gateResults.push({ name: gate.name, passed: true, output: gateResult.stdout, attempts: attempt });
+            } catch (err: any) {
+              allGatesPassed = false;
+              const errOutput = err.stdout ?? err.stderr ?? err.message ?? String(err);
+              gateResults.push({ name: gate.name, passed: false, output: errOutput, attempts: attempt });
+            }
+          }
+
+          if (allGatesPassed) {
+            this.logger.log(`[process] Task ${taskId}: all gates passed on attempt ${attempt}`);
+            break;
+          }
+
+          this.logger.warn(`[process] Task ${taskId}: gates failed on attempt ${attempt}/${MAX_GATE_RETRIES}`);
+
+          if (attempt < MAX_GATE_RETRIES) {
+            // Self-healing: run Claude Code again with gate failure context
+            const failedGates = gateResults.filter(g => !g.passed);
+            const healPrompt = `The following automated gates failed after your changes:\n\n${failedGates.map(g => `Gate "${g.name}" FAILED:\n${g.output}`).join('\n\n')}\n\nFix the issues so all gates pass. Do NOT commit or push.`;
+
+            this.logger.log(`[process] Task ${taskId}: running self-heal attempt ${attempt}...`);
+            await this.execWithTimeout(
+              claudeBin,
+              ['-p', healPrompt, '--output-format', 'json', '--dangerously-skip-permissions'],
+              { cwd: tmpDir, env: { ...process.env, ANTHROPIC_API_KEY: apiKey }, maxBuffer: 50 * 1024 * 1024 },
+              timeout,
+            );
+          }
+        }
+
+        if (!allGatesPassed) {
+          this.logger.warn(`[process] Task ${taskId}: gates failed after ${MAX_GATE_RETRIES} attempts — not committing`);
+          try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+          return { success: false, output: 'Gates failed after 3 attempts', exitCode: 1, gateResults, allGatesPassed: false };
+        }
+      }
+
+      // 7. Check if any files were changed — only commit/push if gates passed
       let branchPushed = false;
       if (params.repoUrl) {
         const diffResult = await this.exec('git', ['status', '--porcelain'], { cwd: tmpDir });
@@ -177,12 +239,12 @@ export class ContainerService {
         }
       }
 
-      // 7. Cleanup temp directory
+      // 8. Cleanup temp directory
       try {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       } catch { /* ignore cleanup errors */ }
 
-      return { success: claudeResult.exitCode === 0, output, exitCode: claudeResult.exitCode, branchPushed };
+      return { success: claudeResult.exitCode === 0, output, exitCode: claudeResult.exitCode, branchPushed, gateResults, allGatesPassed };
 
     } catch (err) {
       this.logger.error(`[process] Task ${taskId} failed: ${(err as Error).message}`);
@@ -207,6 +269,29 @@ export class ContainerService {
       }, (error, stdout, stderr) => {
         if (error) {
           this.logger.warn(`Command failed: ${command} ${args.join(' ')} — ${error.message}`);
+          reject(error);
+        } else {
+          resolve({ stdout: stdout ?? '', stderr: stderr ?? '' });
+        }
+      });
+    });
+  }
+
+  // Helper to execute a shell command (supports pipes, redirects, etc.)
+  private async execShell(
+    command: string,
+    options?: { cwd?: string },
+  ): Promise<{ stdout: string; stderr: string }> {
+    return new Promise((resolve, reject) => {
+      execFile('sh', ['-c', command], {
+        cwd: options?.cwd,
+        maxBuffer: 50 * 1024 * 1024,
+        timeout: 120000,
+      }, (error, stdout, stderr) => {
+        if (error) {
+          // Attach stdout/stderr to error for gate diagnostics
+          (error as any).stdout = stdout ?? '';
+          (error as any).stderr = stderr ?? '';
           reject(error);
         } else {
           resolve({ stdout: stdout ?? '', stderr: stderr ?? '' });

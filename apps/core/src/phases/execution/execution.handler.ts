@@ -122,7 +122,10 @@ export class ExecutionHandler implements PhaseHandler {
               branch: `orchestra/${workflowRun.ticketId}/${pt.branch ?? pt.id}`,
               dependsOn: pt.dependsOn ?? [],
               status: 'PENDING',
-              gateResults: pt.gates ?? {},
+              gateResults: {
+                automatedGates: pt.automatedGates ?? pt.gates ?? [],
+                manualGates: pt.manualGates ?? [],
+              },
             },
           });
         }
@@ -176,8 +179,9 @@ export class ExecutionHandler implements PhaseHandler {
             title: planTask?.title ?? task.ticketId,
             description: planTask?.description ?? `Implement task ${task.ticketId}`,
             acceptanceCriteria: planTask?.acceptanceCriteria ?? [],
-            gates: planTask?.gates ?? [],
+            gates: planTask?.automatedGates ?? planTask?.gates ?? [],
           },
+          automatedGates: planTask?.automatedGates ?? planTask?.gates ?? [],
         });
       } catch (err) {
         this.logger.warn(`Failed to enqueue task ${task.id}: ${(err as Error).message}`);
@@ -235,8 +239,12 @@ export class ExecutionHandler implements PhaseHandler {
 
         this.logger.log(`Task ${taskId} passed all gates`);
 
+        // Determine manual gates from the plan
+        const manualGates: { name: string; description: string }[] = planTask?.manualGates ?? [];
+
         // Create PR for tasks that target a repo (non-null repo in plan)
         // Skip tasks with repo=null (investigation/admin tasks)
+        let prUrl: string | null = null;
         if (task && planTask?.repo) {
           const taskRepo = this.resolveTaskRepo(task.ticketId, phaseData, workflowRun);
           try {
@@ -247,6 +255,7 @@ export class ExecutionHandler implements PhaseHandler {
               targetBranch: taskRepo.defaultBranch,
               repo: taskRepo.slug,
             });
+            prUrl = pr.url;
             await this.prisma.task.update({ where: { id: task.id }, data: { prUrl: pr.url } });
             this.logger.log(`Created PR for task ${task.id}: ${pr.url}`);
           } catch (err) {
@@ -257,10 +266,43 @@ export class ExecutionHandler implements PhaseHandler {
           this.logger.log(`Task ${taskId}: no repo in plan — skipping PR creation`);
         }
 
+        // If manual gates exist, post checklist on PR and set AWAITING_MANUAL_GATES
+        if (manualGates.length > 0 && prUrl && task) {
+          const checklistBody = [
+            '## Manual Validation Required',
+            '',
+            'Please verify the following before approving this PR:',
+            '',
+            ...manualGates.map(g => `- [ ] **${g.name}**: ${g.description}`),
+            '',
+            'Reply with `/orchestra gates-passed` when all manual checks pass, or `/orchestra fix: [description]` if issues are found.',
+          ].join('\n');
+
+          try {
+            const match = prUrl.match(/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/);
+            if (match) {
+              const [, repo, prNumberStr] = match;
+              await this.codeHost.addPRComment(repo, parseInt(prNumberStr, 10), checklistBody);
+              this.logger.log(`Posted manual gates checklist on PR ${prUrl}`);
+            }
+          } catch (err) {
+            this.logger.warn(`Failed to post manual gates checklist: ${(err as Error).message}`);
+          }
+
+          await this.prisma.task.update({
+            where: { id: task.id },
+            data: { status: 'AWAITING_MANUAL_GATES' },
+          });
+          this.logger.log(`Task ${taskId} set to AWAITING_MANUAL_GATES`);
+        } else if (task) {
+          // No manual gates — task is fully PASSED (already set above by gate runner)
+          this.logger.log(`Task ${taskId}: no manual gates — fully passed`);
+        }
+
         // Enqueue unblocked downstream tasks
         await this.enqueueUnblockedTasks(workflowRun, phaseData);
 
-        // Check if all tasks are done
+        // Check if all tasks are done — AWAITING_MANUAL_GATES does NOT count as passed
         const allTasks = await this.prisma.task.findMany({
           where: { workflowRunId: workflowRun.id },
         });
@@ -281,6 +323,80 @@ export class ExecutionHandler implements PhaseHandler {
               phaseData: { ...phaseData, execution },
             },
           });
+        }
+      }
+    }
+
+    if (event.type === 'manual_gates_passed') {
+      const taskId = event.payload.taskId as string;
+      this.logger.log(`Manual gates passed for task ${taskId}`);
+
+      await this.prisma.task.update({
+        where: { id: taskId },
+        data: { status: 'PASSED' },
+      });
+
+      // Check if all tasks are now fully done
+      const allTasks = await this.prisma.task.findMany({
+        where: { workflowRunId: workflowRun.id },
+      });
+      const allTasksPassed = allTasks.every((t) => t.status === 'PASSED');
+
+      if (allTasksPassed) {
+        this.logger.log(`All ${allTasks.length} tasks passed (including manual gates) — execution phase complete`);
+        execution.status = 'completed';
+        execution.completedAt = new Date().toISOString();
+        execution.allTasksPassed = true;
+        execution.readyForCompletion = true;
+
+        await this.prisma.workflowRun.update({
+          where: { id: workflowRun.id },
+          data: {
+            phaseData: { ...phaseData, execution },
+          },
+        });
+      }
+    }
+
+    if (event.type === 'manual_gate_fix_requested') {
+      const taskId = event.payload.taskId as string;
+      const fixDescription = event.payload.fixDescription as string;
+      const task = await this.prisma.task.findUnique({ where: { id: taskId } });
+
+      if (task && task.status === 'AWAITING_MANUAL_GATES') {
+        this.logger.log(`Fix requested for task ${taskId}: ${fixDescription}`);
+
+        // Set task back to PENDING and re-queue with fix context
+        await this.prisma.task.update({
+          where: { id: taskId },
+          data: { status: 'PENDING' },
+        });
+
+        const taskRepo = this.resolveTaskRepo(task.ticketId, phaseData, workflowRun);
+        const planTasks = (phaseData.planning?.tasks ?? []) as any[];
+        const planTask = planTasks.find((t: any) => t.id === task.ticketId);
+
+        const fixPrompt = `A reviewer found issues during manual validation of your PR on branch ${task.branch}.\n\nFix requested: ${fixDescription}\n\nPlease fix the issues. This is a fix request from manual gate review.`;
+
+        try {
+          await this.taskQueue.enqueue({
+            taskId: task.id,
+            workflowRunId: workflowRun.id,
+            prompt: fixPrompt,
+            workingDirectory: '.',
+            repoUrl: taskRepo.url,
+            branch: task.branch,
+            baseBranch: taskRepo.defaultBranch,
+            taskDefinition: {
+              title: planTask?.title ?? task.ticketId,
+              description: fixPrompt,
+              acceptanceCriteria: planTask?.acceptanceCriteria ?? [],
+              gates: planTask?.automatedGates ?? planTask?.gates ?? [],
+            },
+            automatedGates: planTask?.automatedGates ?? planTask?.gates ?? [],
+          });
+        } catch (err) {
+          this.logger.warn(`Failed to enqueue fix for task ${taskId}: ${(err as Error).message}`);
         }
       }
     }
@@ -420,8 +536,9 @@ export class ExecutionHandler implements PhaseHandler {
               title: planTask?.title ?? task.ticketId,
               description: planTask?.description ?? `Implement task ${task.ticketId}`,
               acceptanceCriteria: planTask?.acceptanceCriteria ?? [],
-              gates: planTask?.gates ?? [],
+              gates: planTask?.automatedGates ?? planTask?.gates ?? [],
             },
+            automatedGates: planTask?.automatedGates ?? planTask?.gates ?? [],
           });
         } catch (err) {
           this.logger.warn(
@@ -467,6 +584,7 @@ export class ExecutionHandler implements PhaseHandler {
         pending: tasks.filter((t) => t.status === 'PENDING').length,
         failed: tasks.filter((t) => t.status === 'FAILED').length,
         passed: tasks.filter((t) => t.status === 'PASSED').length,
+        awaitingManualGates: tasks.filter((t) => t.status === 'AWAITING_MANUAL_GATES').length,
       },
     };
   }

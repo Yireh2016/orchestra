@@ -76,6 +76,12 @@ IMPORTANT: For each task, select the correct repository from the list above base
 
 If the entire plan is small enough to be done in a single PR, create just one task.
 
+CRITICAL: Every task MUST have gates that verify its acceptance criteria:
+- automatedGates: commands that can be run in the repo to verify the task is done (tests, lint, build, type-check). These MUST pass before a PR is created.
+- manualGates: checks that require human verification (UI testing, performance, etc.). These will be posted as a checklist on the PR for human validation.
+- If the repo has a test runner, include it. If you're unsure, include "npm test" or the appropriate test command for the tech stack.
+- Investigation tasks (repo: null) don't need gates.
+
 Respond with ONLY a JSON object in this exact format:
 {
   "overview": "Brief description of the plan",
@@ -86,8 +92,15 @@ Respond with ONLY a JSON object in this exact format:
       "description": "What this task does",
       "repo": "https://github.com/org/repo",
       "dependsOn": [],
-      "acceptanceCriteria": ["Criteria 1"],
-      "gates": [{"name": "Tests pass", "command": "npm test"}],
+      "acceptanceCriteria": ["Criteria 1", "Criteria 2"],
+      "automatedGates": [
+        {"name": "Unit tests pass", "command": "npm test"},
+        {"name": "Lint passes", "command": "npm run lint"},
+        {"name": "Build succeeds", "command": "npm run build"}
+      ],
+      "manualGates": [
+        {"name": "Feature works in UI", "description": "Verify the feature works as expected in the browser"}
+      ],
       "branch": "task-slug"
     }
   ]
@@ -300,7 +313,10 @@ Respond with ONLY the JSON.`;
           branch: `orchestra/${workflowRun.ticketId}/${task.branch ?? task.id}`,
           dependsOn: task.dependsOn ?? [],
           status: 'PENDING',
-          gateResults: task.gates ?? {},
+          gateResults: {
+            automatedGates: task.automatedGates ?? task.gates ?? [],
+            manualGates: task.manualGates ?? [],
+          },
         },
       });
     }
